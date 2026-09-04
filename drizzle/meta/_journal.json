@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1788112147385,
+      "tag": "0000_shocking_silhouette",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788149266840,
+      "tag": "0001_ambitious_silvermane",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788167871079,
+      "tag": "0002_fantastic_wolfpack",
+      "breakpoints": true
+    }
+  ]
+}

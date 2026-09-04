@@ -1,0 +1,20 @@
+import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { getUserAIModelPolicy, isSiteAdminUser } from '@/lib/site-users';
+
+export async function GET() {
+  const user = await getChatGPTUser();
+  const modelPolicy = user ? await getUserAIModelPolicy(user) : null;
+  return Response.json(
+    {
+      user: user
+        ? {
+            name: user.displayName,
+            email: user.email,
+            isAdmin: isSiteAdminUser(user),
+            allowedAIModels: modelPolicy?.allowedAIModels,
+          }
+        : null,
+    },
+    { headers: { 'Cache-Control': 'no-store' } },
+  );
+}
