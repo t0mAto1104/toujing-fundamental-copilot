@@ -3,6 +3,7 @@ import type { CompanyReport } from '@/lib/research-types';
 export async function readResearchResponse(
   response: Response,
   onProgress: (message: string) => void,
+  onTask?: (id: string) => void,
 ): Promise<CompanyReport> {
   if (!response.headers.get('content-type')?.includes('application/x-ndjson')) {
     const payload = (await response.json()) as CompanyReport & {
@@ -24,8 +25,10 @@ export async function readResearchResponse(
       message?: string;
       error?: string;
       report?: CompanyReport;
+      taskId?: string;
     };
     if (event.type === 'error') throw new Error(event.error || '研究未完成');
+    if (event.type === 'task' && event.taskId) onTask?.(event.taskId);
     if (event.type === 'progress' && event.message) onProgress(event.message);
     if (event.type === 'report' && event.report) report = event.report;
   };

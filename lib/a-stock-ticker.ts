@@ -13,7 +13,9 @@ const shIndexCodes = new Set([
 ]);
 
 function inferredMarket(code: string): AStockMarket {
-  if (code.startsWith('92') || /^(43|83|87)/.test(code)) return 'BJ';
+  // Market inference is broader than the admitted live A-share universe.
+  // quote-types / security search still reject unsupported NEEQ and B-share assets.
+  if (/^(4|8|92)/.test(code)) return 'BJ';
   if (/^[569]/.test(code) || shIndexCodes.has(code)) return 'SH';
   return 'SZ';
 }

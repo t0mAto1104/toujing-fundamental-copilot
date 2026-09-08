@@ -1,6 +1,6 @@
 # 项目开发 Skills
 
-这两个 Skill 用于 Codex 开发本项目，不是网站运行时的 AI 研究工具。
+以下 Skill 用于 Codex 开发本项目，不是网站运行时的 AI 研究工具。
 
 - `awesome-design-md`：界面设计或样式优化任务按需使用。入口为 `/Users/jerry_t0mato/.codex/skills/awesome-design-md/SKILL.md`；先读入口，再读选中的设计参考，不要全量加载资料库。
 - `ponytail`：代码开发、修复和重构任务使用。入口为 `/Users/jerry_t0mato/.codex/skills/ponytail/SKILL.md`；先理解调用链，优先复用已有实现，以最小有效改动完成需求。
@@ -14,6 +14,7 @@
 
 ## 固定上游版本
 
+- [a-stock-data](https://github.com/t0mAto1104/a-stock-data)：v3.8.0，`15739a164c4f38c83738be24ec77672b3a031dbd`；本机入口 `/Users/jerry_t0mato/.codex/skills/a-stock-data/SKILL.md`。官方日历、北交所备用行情、指数成分/权重/估值、沪深两融适配为 HTTP＋D1，不运行其 Python 服务，不加入 AI 提示词。
 - [awesome-design-md](https://github.com/t0mAto1104/awesome-design-md)：`8147538b4226ae41e2487a9179e3bcc1f68e8554`，已适配为本地设计资料 Skill。
 - [ponytail](https://github.com/t0mAto1104/ponytail)：`2ed6c52c9d7e5e56942508591085fd45dea277d3`，只安装核心 Skill，做了 Codex 元数据、任务作用域及复用现有测试流程的兼容调整，没有安装插件 hooks。
 

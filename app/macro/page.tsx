@@ -30,11 +30,18 @@ export default function MacroPage() {
   const [query, setQuery] = useState('');
   const [dailyNews, setDailyNews] = useState<DailyMacroNews[]>([]);
   const [updating, setUpdating] = useState(true);
+  const [historyStatus, setHistoryStatus] = useState<{
+    from: string;
+    complete: boolean;
+    stale: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     let requestTimeout = 0;
-    const initial = window.setTimeout(() => {
+    let retryTimer = 0;
+    let retries = 0;
+    const load = () => {
       requestTimeout = window.setTimeout(() => controller.abort(), 20_000);
       void fetch('/api/macro-data', {
         method: 'GET',
@@ -43,18 +50,31 @@ export default function MacroPage() {
       })
         .then(async (response) => {
           if (!response.ok) return;
-          const value = (await response.json()) as { news?: DailyMacroNews[] };
-          setDailyNews(value.news || []);
+          const value = (await response.json()) as {
+            news?: DailyMacroNews[];
+            macroNews?: DailyMacroNews[];
+            macroHistory?: typeof historyStatus;
+          };
+          setDailyNews(value.macroNews || value.news || []);
+          setHistoryStatus(value.macroHistory || null);
+          if (
+            value.macroHistory?.stale &&
+            retries++ < 2 &&
+            !controller.signal.aborted
+          )
+            retryTimer = window.setTimeout(load, 10_000);
         })
         .catch(() => undefined)
         .finally(() => {
           window.clearTimeout(requestTimeout);
           setUpdating(false);
         });
-    }, 0);
+    };
+    const initial = window.setTimeout(load, 0);
     return () => {
       window.clearTimeout(initial);
       window.clearTimeout(requestTimeout);
+      window.clearTimeout(retryTimer);
       controller.abort();
     };
   }, []);
@@ -120,15 +140,34 @@ export default function MacroPage() {
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
               汇总2026年初至今的官方宏观数据与政策信息，并解释其对行业和公司基本面判断的含义。
             </p>
+            {historyStatus && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                近期快讯回溯至 {historyStatus.from || '待核验'}
+                ；更早官方资料为精选。
+                {historyStatus.stale
+                  ? '本轮更新未完成，暂展示已核验记录；可刷新重试。'
+                  : !historyStatus.complete
+                    ? '部分历史快讯尚未取回，不代表期间没有事件。'
+                    : ''}
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="text-primary hover:underline"
+              aria-label="刷新宏观与政策资讯"
+            >
+              刷新
+            </button>
             {updating ? (
               <RefreshCw className="size-3.5 animate-spin" />
             ) : (
               <CalendarDays className="size-4" />
             )}
             {updating
-              ? '正在抓取今日最新信息'
+              ? '正在获取近期资讯与历史记录'
               : '2026-01-01 至今 · HTTP抓取并写入共享缓存'}
           </div>
         </div>

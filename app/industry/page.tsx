@@ -10,6 +10,8 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { WorkspaceShell } from '@/components/workspace-shell';
+import { BoardFunds } from '@/components/market-signals';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { getPreferredAIModel } from '@/lib/ai-models';
 import {
   popularIndustryNames,
@@ -47,6 +49,25 @@ type LiveIndustry = {
 };
 
 export default function IndustryPage() {
+  return (
+    <WorkspaceShell active="industry">
+      <Tabs defaultValue="compare">
+        <TabsList aria-label="行业数据视图">
+          <TabsTrigger value="compare">行业比较</TabsTrigger>
+          <TabsTrigger value="funds">板块资金</TabsTrigger>
+        </TabsList>
+        <TabsContent value="compare" keepMounted>
+          <IndustryComparison />
+        </TabsContent>
+        <TabsContent value="funds">
+          <BoardFunds />
+        </TabsContent>
+      </Tabs>
+    </WorkspaceShell>
+  );
+}
+
+function IndustryComparison() {
   const [leftName, setLeftName] = useState('半导体');
   const [rightName, setRightName] = useState('创新药');
   const [comparison, setComparison] = useState<AIComparison | null>(null);
@@ -153,7 +174,7 @@ export default function IndustryPage() {
   };
 
   return (
-    <WorkspaceShell active="industry">
+    <>
       <div className="mx-auto max-w-6xl">
         <div className="flex flex-col justify-between gap-5 border-b border-border pb-6 md:flex-row md:items-end">
           <div>
@@ -339,6 +360,6 @@ export default function IndustryPage() {
           实时行情与 AI 核验均仅供信息参考，不构成技术指标、行情预测或投资建议。
         </p>
       </div>
-    </WorkspaceShell>
+    </>
   );
 }

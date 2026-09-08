@@ -1,4 +1,5 @@
 import { ensureReportDatabase, getReportDatabase } from '@/lib/report-database';
+import { observeDataSource } from '@/lib/data-source-health';
 
 type SnapshotRow = {
   payload_json: string;
@@ -38,22 +39,28 @@ function parseRow<T>(row: SnapshotRow | null): DataSnapshot<T> | null {
 
 export async function readDataSnapshot<T>(cacheKey: string) {
   const local = memory.get(cacheKey) as DataSnapshot<T> | undefined;
-  if (local)
-    return { ...local, stale: local.expiresAt <= new Date().toISOString() };
+  if (local && local.expiresAt > new Date().toISOString())
+    return { ...local, stale: false };
 
   const database = getReportDatabase();
-  if (!database) return null;
-  await ensureReportDatabase(database);
-  const row = await database
-    .prepare(
-      `SELECT payload_json, source_name, source_url, fetched_at, expires_at
+  const fallback = local ? { ...local, stale: true } : null;
+  if (!database) return fallback;
+  try {
+    await ensureReportDatabase(database);
+    const row = await database
+      .prepare(
+        `SELECT payload_json, source_name, source_url, fetched_at, expires_at
        FROM data_snapshots WHERE cache_key = ?`,
-    )
-    .bind(cacheKey)
-    .first<SnapshotRow>();
-  const parsed = parseRow<T>(row);
-  if (parsed) memory.set(cacheKey, parsed as DataSnapshot<unknown>);
-  return parsed;
+      )
+      .bind(cacheKey)
+      .first<SnapshotRow>();
+    const parsed = parseRow<T>(row);
+    if (parsed) memory.set(cacheKey, parsed as DataSnapshot<unknown>);
+    return parsed || fallback;
+  } catch (error) {
+    if (fallback) return fallback;
+    throw error;
+  }
 }
 
 export async function storeDataSnapshot<T>(
@@ -119,25 +126,40 @@ export async function getOrRefreshDataSnapshot<T>(options: {
   requestScoped?: boolean;
 }): Promise<DataSnapshot<T>> {
   const cached = await readDataSnapshot<T>(options.cacheKey);
-  if (cached && !cached.stale) return cached;
+  if (cached && !cached.stale) {
+    await observeDataSource(options, 'cache');
+    return cached;
+  }
 
   const existing = inflight.get(options.cacheKey) as
     | Promise<DataSnapshot<T>>
     | undefined;
   if (existing && !options.requestScoped) return existing;
 
+  const started = Date.now();
   const task = options
     .refresh()
-    .then((value) =>
-      storeDataSnapshot(
+    .catch(async (error) => {
+      await observeDataSource(
+        options,
+        'failure',
+        Date.now() - started,
+        undefined,
+        error,
+      );
+      throw error;
+    })
+    .then(async (value) => {
+      await observeDataSource(options, 'success', Date.now() - started, value);
+      return storeDataSnapshot(
         options.cacheKey,
         options.category,
         value,
         options.ttlMs,
         options.sourceName,
         options.sourceUrl,
-      ),
-    )
+      );
+    })
     .catch((error) => {
       if (cached) return { ...cached, stale: true };
       throw error;

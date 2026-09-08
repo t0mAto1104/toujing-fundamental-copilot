@@ -398,34 +398,17 @@ async function fetchResearchReports(
 async function fetchFundFlow(listing: ListingOption, signal?: AbortSignal) {
   const identity = listingAStockIdentity(listing);
   if (!identity) return null;
-  const secid = aStockEastmoneySecid(identity.code, identity.market);
-  const url = new URL(
-    'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get',
-  );
-  url.searchParams.set('secid', secid);
-  url.searchParams.set('fields1', 'f1,f2,f3,f7');
-  url.searchParams.set(
-    'fields2',
-    'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65',
-  );
-  url.searchParams.set('lmt', '30');
   try {
-    const payload = await eastmoneyJson<{
-      data?: { klines?: string[] } | null;
-    }>(
-      url,
-      { signal, headers: { Referer: 'https://quote.eastmoney.com/' } },
-      10_000,
+    const snapshot = await getStockFlow(
+      `${identity.market.toLowerCase()}${identity.code}`,
+      'day',
+      signal,
     );
-    const rows = payload.data?.klines || [];
-    const recent = rows.slice(-20);
-    const total = recent.reduce((sum, line) => {
-      const value = Number(line.split(',')[1]);
-      return sum + (Number.isFinite(value) ? value : 0);
-    }, 0);
-    if (!recent.length) return null;
+    const recent = snapshot.data.points.slice(-20);
+    if (!recent.length || recent.some((row) => row.main == null)) return null;
+    const total = recent.reduce((sum, row) => sum + row.main!, 0);
     return {
-      period: `最近${recent.length}个交易日`,
+      period: `最近${recent.length}个交易日（截至 ${recent.at(-1)!.time}${snapshot.stale ? '，过期缓存' : ''}）`,
       mainNet: formatYi(total),
       direction:
         total > 0
@@ -433,13 +416,12 @@ async function fetchFundFlow(listing: ListingOption, signal?: AbortSignal) {
           : total < 0
             ? ('净流出' as const)
             : ('持平' as const),
-      sourceUrl: `https://data.eastmoney.com/zjlx/${identity.code}.html`,
+      sourceUrl: snapshot.sourceUrl,
     };
   } catch {
     return null;
   }
 }
-
 async function refreshCompanyPacket(listing: ListingOption) {
   const warnings: string[] = [];
   const identity = listingAStockIdentity(listing);
@@ -588,3 +570,4 @@ export function companyPacketForPrompt(packet: CompanyFundamentalPacket) {
     warnings: packet.warnings,
   });
 }
+import { getStockFlow } from '@/lib/a-stock-signals';

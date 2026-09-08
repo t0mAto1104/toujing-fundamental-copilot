@@ -86,6 +86,9 @@ void test('company returns partial data quickly, caches verified identities in D
     if (quotesFail) throw new Error('quote unavailable');
     assert.equal(url.hostname, 'qt.gtimg.cn', 'no unexpected external request');
     const row = Array<string>(60).fill('');
+    row[1] = '珠免集团';
+    row[2] = '600185';
+    row[30] = '20260907150000';
     row[3] = '10';
     row[4] = '9';
     row[32] = '11.11';

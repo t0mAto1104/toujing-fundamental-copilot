@@ -22,6 +22,34 @@
       "when": 1788167871079,
       "tag": "0002_fantastic_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788517355472,
+      "tag": "0003_market_watchlist",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788624157471,
+      "tag": "0004_ai_usage_cost_details",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788802268926,
+      "tag": "0005_research_workbench",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788803447432,
+      "tag": "0006_research_task_identity",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,6 @@
 import { reasoningEffortForModel, resolveAIModel } from '@/lib/ai-models';
 import { recordAIUsage } from '@/lib/ai-usage';
+import { reserveResearchCall } from '@/lib/research-tasks';
 
 type JsonSchema = Record<string, unknown>;
 
@@ -12,9 +13,16 @@ export type ResearchOptions = {
   webSearch?: boolean;
   instructions?: string;
   promptCacheKey?: string;
+  cacheStableInstructions?: boolean;
   signal?: AbortSignal;
   model?: unknown;
-  audit: { userId: string; endpoint: string };
+  audit: {
+    userId: string;
+    endpoint: string;
+    researchTaskId?: string;
+    leaseId?: string;
+    reservationId?: string;
+  };
   timeoutMs?: number;
   searchContextSize?: 'low' | 'medium';
   requireSearch?: boolean;
@@ -126,6 +134,7 @@ export async function runStructuredResearch<T>({
   webSearch = true,
   instructions,
   promptCacheKey,
+  cacheStableInstructions = false,
   signal,
   model: requestedModel,
   audit,
@@ -140,6 +149,8 @@ export async function runStructuredResearch<T>({
   usage: {
     inputTokens?: number;
     cachedInputTokens?: number;
+    cacheWriteTokens?: number;
+    serviceTier?: string;
     outputTokens?: number;
     totalTokens?: number;
     reasoningTokens?: number;
@@ -156,6 +167,25 @@ export async function runStructuredResearch<T>({
     );
 
   const model = resolveAIModel(requestedModel || process.env.OPENAI_MODEL);
+  signal?.throwIfAborted();
+  if (audit.researchTaskId && audit.leaseId) {
+    audit = {
+      ...audit,
+      reservationId: await reserveResearchCall({
+        userId: audit.userId,
+        taskId: audit.researchTaskId,
+        leaseId: audit.leaseId,
+        model,
+        text: `${instructions || ''}${JSON.stringify(schema)}${prompt}`,
+        output: maxOutputTokens,
+        searches: webSearch ? maxToolCalls : 0,
+      }),
+    };
+  }
+  const explicitCache =
+    cacheStableInstructions &&
+    Boolean(instructions) &&
+    /^(gpt-5\.6-(sol|terra|luna)|gpt-6-astra)$/.test(model);
   const startedAt = Date.now();
   const controller = new AbortController();
   let timedOut = false;
@@ -196,10 +226,33 @@ export async function runStructuredResearch<T>({
             }
           : {}),
         ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
-        instructions:
-          instructions ||
-          '你是严谨的中文基本面研究助手。必须联网核验时效性信息，只引用实际检索到的可靠来源，优先监管机构、交易所、公司公告和官方统计；明确区分事实、推断与不确定性。不得使用均线、KDJ、MACD、形态等技术指标，不得给出买卖指令。所有结论仅供信息参考，不构成投资建议。',
-        input: prompt,
+        instructions: explicitCache
+          ? undefined
+          : instructions ||
+            '你是严谨的中文基本面研究助手。必须联网核验时效性信息，只引用实际检索到的可靠来源，优先监管机构、交易所、公司公告和官方统计；明确区分事实、推断与不确定性。不得使用均线、KDJ、MACD、形态等技术指标，不得给出买卖指令。所有结论仅供信息参考，不构成投资建议。',
+        ...(explicitCache
+          ? {
+              // Only stable rules/schema are cached; changing evidence does not pay
+              // a cache-write premium. Older models keep their supported API shape.
+              prompt_cache_options: { mode: 'explicit', ttl: '30m' },
+              input: [
+                {
+                  role: 'developer',
+                  content: [
+                    {
+                      type: 'input_text',
+                      text: instructions,
+                      prompt_cache_breakpoint: { mode: 'explicit' },
+                    },
+                  ],
+                },
+                {
+                  role: 'user',
+                  content: [{ type: 'input_text', text: prompt }],
+                },
+              ],
+            }
+          : { input: prompt }),
         text: {
           verbosity,
           format: {
@@ -291,12 +344,16 @@ export async function runStructuredResearch<T>({
   }
 
   let payload: {
+    service_tier?: string;
     status?: string;
     incomplete_details?: { reason?: string } | null;
     output?: OpenAIOutput[];
     usage?: {
       input_tokens?: number;
-      input_tokens_details?: { cached_tokens?: number };
+      input_tokens_details?: {
+        cached_tokens?: number;
+        cache_write_tokens?: number;
+      };
       output_tokens?: number;
       total_tokens?: number;
       output_tokens_details?: { reasoning_tokens?: number };
@@ -322,6 +379,12 @@ export async function runStructuredResearch<T>({
   const usageRecord = {
     inputTokens: payload.usage?.input_tokens,
     cachedInputTokens: payload.usage?.input_tokens_details?.cached_tokens,
+    cacheWriteTokens:
+      payload.usage?.input_tokens_details?.cache_write_tokens ??
+      (payload.usage && ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5'].includes(model)
+        ? 0
+        : undefined),
+    serviceTier: payload.service_tier,
     outputTokens: payload.usage?.output_tokens,
     reasoningTokens: payload.usage?.output_tokens_details?.reasoning_tokens,
     totalTokens: payload.usage?.total_tokens,
@@ -427,6 +490,9 @@ export async function runStructuredResearch<T>({
       maxToolCalls: webSearch ? maxToolCalls : 0,
       inputTokens: usageRecord.inputTokens,
       cachedInputTokens: usageRecord.cachedInputTokens,
+      cacheWriteTokens: usageRecord.cacheWriteTokens,
+      serviceTier: usageRecord.serviceTier,
+      researchTaskId: audit.researchTaskId,
       outputTokens: usageRecord.outputTokens,
       reasoningTokens: usageRecord.reasoningTokens,
       totalTokens: usageRecord.totalTokens,

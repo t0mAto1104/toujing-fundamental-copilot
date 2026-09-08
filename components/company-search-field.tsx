@@ -15,6 +15,7 @@ type CompanySearchFieldProps = {
   inputClassName?: string;
   buttonLabel?: string;
   showButton?: boolean;
+  searchEndpoint?: string;
 };
 
 export function CompanySearchField({
@@ -26,6 +27,7 @@ export function CompanySearchField({
   inputClassName = '',
   buttonLabel = '开始研究',
   showButton = false,
+  searchEndpoint = '/api/listings',
 }: CompanySearchFieldProps) {
   const [listings, setListings] = useState<ListingOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -75,7 +77,7 @@ export function CompanySearchField({
           setLoading(false);
           setSearchError('搜索响应超时，请稍后重试。');
         }, 10_000);
-        void fetch(`/api/listings?query=${encodeURIComponent(query)}`, {
+        void fetch(`${searchEndpoint}?query=${encodeURIComponent(query)}`, {
           signal: controller.signal,
           cache: 'no-store',
         })
@@ -127,7 +129,7 @@ export function CompanySearchField({
       if (requestController.current === controller)
         requestController.current = null;
     };
-  }, [value, focused, composing]);
+  }, [value, focused, composing, searchEndpoint]);
 
   const dismissSuggestions = () => {
     requestId.current += 1;
@@ -151,7 +153,9 @@ export function CompanySearchField({
     const query = value.trim();
     if (!query) return;
     const listing =
-      selected ||
+      (selected && (selected.name === query || selected.code === query)
+        ? selected
+        : undefined) ||
       listings.find((item) => item.name === query || item.code === query);
     dismissSuggestions();
     onResearch(query, listing);
@@ -216,7 +220,11 @@ export function CompanySearchField({
         }}
         className={`pl-10 ${showButton ? 'pr-28' : ''} ${inputClassName}`}
         placeholder={placeholder}
-        aria-label="搜索上市公司"
+        aria-label={
+          searchEndpoint === '/api/listings'
+            ? '搜索上市公司'
+            : '搜索股票、ETF 或指数'
+        }
         aria-expanded={open}
         aria-autocomplete="list"
       />
@@ -233,7 +241,7 @@ export function CompanySearchField({
           {loading ? (
             <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
               <LoaderCircle className="size-3.5 animate-spin" />
-              正在查找上市公司，请稍后…
+              正在查找证券，请稍后…
             </div>
           ) : listings.length ? (
             <ul className="max-h-72 overflow-y-auto py-1">
@@ -264,7 +272,7 @@ export function CompanySearchField({
           ) : value.trim().length >= 2 ? (
             <div className="px-4 py-3 text-xs leading-5 text-muted-foreground">
               {searchError ||
-                '未识别到上市公司。请核对名称，或尝试股票简称、证券代码。'}
+                '未识别到证券。请核对名称，或尝试简称、证券代码。'}
             </div>
           ) : null}
         </div>

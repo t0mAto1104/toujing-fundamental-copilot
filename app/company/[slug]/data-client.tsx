@@ -12,6 +12,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { CompanySearchField } from '@/components/company-search-field';
+import { BoardMemberships, StockSignals } from '@/components/market-signals';
+import { OfficialMarginPanel } from '@/components/official-market-data';
+import { useTradingSession } from '@/components/trading-session';
+import { marketPollInterval, quoteDateStale } from '@/lib/official-data-types';
+import { listingAStockIdentity } from '@/lib/a-stock-ticker';
 import { WorkspaceShell } from '@/components/workspace-shell';
 import type { CompanyFundamentalPacket } from '@/lib/a-stock-company';
 import type { ListingOption, VerifiedQuote } from '@/lib/market-listings';
@@ -46,6 +51,10 @@ function displayTime(value?: string | null) {
 
 export default function CompanyData() {
   const [data, setData] = useState<CompanyDataResponse | null>(null);
+  const identity = data ? listingAStockIdentity(data.listing) : null;
+  const signalSymbol = identity
+    ? `${identity.market.toLowerCase()}${identity.code}`
+    : '';
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -144,9 +153,26 @@ export default function CompanyData() {
     [pageQuery.listing, pageQuery.query],
   );
 
+  const session = useTradingSession();
+  const pollInterval = useRef(20_000);
   useEffect(() => {
+    pollInterval.current =
+      data &&
+      (data.packetPending ||
+        data.quotePending ||
+        !['SH', 'SZ', 'BJ'].includes(data.listing.exchangeCode))
+        ? 20_000
+        : marketPollInterval(session, 20_000);
+  }, [data, session]);
+  useEffect(() => {
+    let lastAutomatic = Date.now();
     const initial = window.setTimeout(() => void load(), 0);
-    const quoteTimer = window.setInterval(() => void load(true), 20_000);
+    const quoteTimer = window.setInterval(() => {
+      if (Date.now() - lastAutomatic >= pollInterval.current) {
+        lastAutomatic = Date.now();
+        void load(true);
+      }
+    }, 20_000);
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') void load(true);
     };
@@ -254,6 +280,9 @@ export default function CompanyData() {
 
         {data ? (
           <>
+            {signalSymbol ? (
+              <BoardMemberships key={signalSymbol} symbol={signalSymbol} />
+            ) : null}
             <section className="mt-7 grid gap-px border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
               {[
                 [
@@ -491,6 +520,21 @@ export default function CompanyData() {
                 </section>
               </aside>
             </div>
+            {signalSymbol ? (
+              <div className="mt-8">
+                {data.quote && quoteDateStale(data.quote.asOf, session) ? (
+                  <p className="mb-4 text-xs text-amber-700 dark:text-amber-300">
+                    报价日期落后于应有交易日；当前价格仅为来源标注时点的记录。
+                  </p>
+                ) : null}
+                <OfficialMarginPanel
+                  key={`margin:${signalSymbol}`}
+                  symbol={signalSymbol}
+                />
+                <div className="mt-6" />
+                <StockSignals key={signalSymbol} symbol={signalSymbol} />
+              </div>
+            ) : null}
             <p className="mt-8 border-t border-border pt-4 text-[10px] leading-5 text-muted-foreground">
               数据只用于信息展示，不能保证交易所之外的第三方源绝对连续；页面不构成投资建议。
             </p>

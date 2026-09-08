@@ -2,6 +2,7 @@ import type { ChatGPTUser } from '@/app/chatgpt-auth';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { env } from 'cloudflare:workers';
 import { ensureReportDatabase, getReportDatabase } from '@/lib/report-database';
+import { within } from '@/lib/request-deadline';
 import {
   DEFAULT_AI_MODEL,
   isAIModelId,
@@ -65,7 +66,7 @@ export function isSiteAdminUser(user: ChatGPTUser | null) {
   return adminEmails.includes(user.email.toLowerCase());
 }
 
-export async function touchSiteUser(user: ChatGPTUser) {
+async function syncSiteUser(user: ChatGPTUser) {
   const database = getReportDatabase();
   if (!database) return null;
   await ensureReportDatabase(database);
@@ -86,6 +87,19 @@ export async function touchSiteUser(user: ChatGPTUser) {
   return database;
 }
 
+function researchDatabaseUnavailable(): never {
+  throw new ResearchAccessError(
+    '账户权限数据库暂时不可用，请稍后重试。',
+    'database_unavailable',
+    503,
+    true,
+  );
+}
+
+export async function touchSiteUser(user: ChatGPTUser) {
+  return within(syncSiteUser(user), 4_000).catch(researchDatabaseUnavailable);
+}
+
 export async function requireResearchAccess(): Promise<ResearchContext> {
   const user = await getChatGPTUser();
   if (!user)
@@ -102,14 +116,17 @@ export async function requireResearchAccess(): Promise<ResearchContext> {
       503,
       true,
     );
-  const row = await database
-    .prepare(
-      `SELECT research_enabled, daily_research_limit, daily_research_used,
+  const row = await within(
+    database
+      .prepare(
+        `SELECT research_enabled, daily_research_limit, daily_research_used,
         daily_research_date, allowed_ai_models
         FROM users WHERE id = ? LIMIT 1`,
-    )
-    .bind(user.userId)
-    .first<UserResearchRow>();
+      )
+      .bind(user.userId)
+      .first<UserResearchRow>(),
+    4_000,
+  ).catch(researchDatabaseUnavailable);
   if (!row || !row.research_enabled)
     throw new ResearchAccessError(
       '站点管理员已暂停当前账户的 AI 研究权限。如需恢复，请联系站点管理员。',
@@ -144,20 +161,56 @@ export function resolvePermittedAIModel(
 }
 
 export async function getUserAIModelPolicy(user: ChatGPTUser) {
-  const database = await touchSiteUser(user);
-  if (!database) return { allowedAIModels: [DEFAULT_AI_MODEL] };
-  const row = await database
-    .prepare('SELECT allowed_ai_models FROM users WHERE id = ? LIMIT 1')
-    .bind(user.userId)
-    .first<{ allowed_ai_models: string }>();
-  return {
-    allowedAIModels: parseAllowedAIModels(row?.allowed_ai_models || ''),
-  };
+  // This is display-only. A slow D1 call must not prevent authenticated HTML
+  // from rendering. Paid routes still call requireResearchAccess against D1.
+  let stage = 'user_record';
+  const startedAt = Date.now();
+  try {
+    const policy = await within(
+      (async () => {
+        const database = await touchSiteUser(user);
+        if (!database) throw new Error('Missing database binding');
+        stage = 'model_policy';
+        const row = await database
+          .prepare('SELECT allowed_ai_models FROM users WHERE id = ? LIMIT 1')
+          .bind(user.userId)
+          .first<{ allowed_ai_models: string }>();
+        if (!row) throw new Error('Missing user policy');
+        return parseAllowedAIModels(row.allowed_ai_models);
+      })(),
+      2_000,
+    );
+    return { allowedAIModels: policy, modelPolicyUnavailable: false };
+  } catch (error) {
+    console.warn(
+      'workspace_policy_unavailable',
+      JSON.stringify({
+        stage,
+        elapsedMs: Date.now() - startedAt,
+        reason: error instanceof Error ? error.name : 'Error',
+      }),
+    );
+    return { allowedAIModels: [] as AIModelId[], modelPolicyUnavailable: true };
+  }
 }
 
-export async function consumeDailyResearchQuota(context: ResearchContext) {
+export async function consumeDailyResearchQuota(
+  context: ResearchContext,
+  taskId?: string,
+  leaseId?: string,
+) {
   const now = new Date().toISOString();
-  const result = await context.database
+  if (taskId) {
+    const task = await context.database
+      .prepare(
+        "SELECT quota_consumed FROM research_tasks WHERE id = ? AND user_id = ? AND lease_id = ? AND status = 'running' AND lease_expires_at > ?",
+      )
+      .bind(taskId, context.user.userId, leaseId || '', now)
+      .first<{ quota_consumed: number }>();
+    if (!task) throw new Error('任务锁已失效。');
+    if (task.quota_consumed) return;
+  }
+  const statement = context.database
     .prepare(
       `UPDATE users SET
         daily_research_used = CASE
@@ -170,7 +223,12 @@ export async function consumeDailyResearchQuota(context: ResearchContext) {
         AND (
           daily_research_date <> ? OR
           daily_research_used < daily_research_limit
-        )`,
+        ) ${
+          taskId
+            ? `AND EXISTS (SELECT 1 FROM research_tasks t WHERE t.id = ? AND t.user_id = users.id
+          AND t.lease_id = ? AND t.status = 'running' AND t.lease_expires_at > ? AND t.quota_consumed = 0)`
+            : ''
+        }`,
     )
     .bind(
       context.dateKey,
@@ -178,9 +236,30 @@ export async function consumeDailyResearchQuota(context: ResearchContext) {
       now,
       context.user.userId,
       context.dateKey,
-    )
-    .run();
+      ...(taskId ? [taskId, leaseId || '', now] : []),
+    );
+  const result = taskId
+    ? (
+        await context.database.batch([
+          statement,
+          context.database
+            .prepare(
+              `UPDATE research_tasks SET quota_consumed = 1 WHERE id = ? AND user_id = ? AND lease_id = ? AND changes() = 1`,
+            )
+            .bind(taskId, context.user.userId, leaseId || ''),
+        ])
+      )[0]
+    : await statement.run();
   if (result.meta.changes) return;
+  if (taskId) {
+    const existing = await context.database
+      .prepare(
+        "SELECT quota_consumed FROM research_tasks WHERE id = ? AND user_id = ? AND lease_id = ? AND status = 'running' AND lease_expires_at > ?",
+      )
+      .bind(taskId, context.user.userId, leaseId || '', now)
+      .first<{ quota_consumed: number }>();
+    if (existing?.quota_consumed) return;
+  }
   const current = await context.database
     .prepare(
       `SELECT research_enabled, daily_research_limit, daily_research_used,

@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { Input } from '@/components/ui/input';
 import { WorkspaceShell } from '@/components/workspace-shell';
+import { ResearchTaskCenter } from '@/components/research-task-center';
 import {
   readStoredReports,
   removeSavedReport,
@@ -47,7 +48,8 @@ export default function ReportsPage() {
               我的报告
             </h1>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              完成的公司研究会自动保存在当前浏览器，打开后仍可另存为 PDF。
+              新研究按任务保存到共享数据库；历史版本可直接打开、对比及另存为
+              PDF。
             </p>
           </div>
           <div className="relative w-full sm:w-72">
@@ -60,6 +62,7 @@ export default function ReportsPage() {
             />
           </div>
         </div>
+        <ResearchTaskCenter />
         {visible.length ? (
           <div className="mt-6 overflow-hidden rounded-2xl border border-border">
             {visible.map((report) => (

@@ -5,6 +5,7 @@ import {
   checkpointedResearchStage,
   researchCheckpointKey,
   saveResearchCheckpoint,
+  readResearchCheckpoint,
 } from '../lib/research-checkpoints';
 import {
   businessWritingSchema,
@@ -22,6 +23,11 @@ import { canonicalSourceUrl } from '../lib/research-integrity';
 import { RESEARCH_TOPICS } from '../lib/research-framework';
 import { generateCompanyResearch } from '../lib/company-research-pipeline';
 import type { ListingOption } from '../lib/market-listings';
+import { publicEvidenceKey } from '../lib/research-evidence-plan';
+import {
+  readDataSnapshot,
+  storeDataSnapshot,
+} from '../lib/data-snapshot-cache';
 
 const dossier: ResearchDossier = {
   fetchedAt: '2026-09-04T00:00:00.000Z',
@@ -296,14 +302,44 @@ void test('a timed-out writing half resumes without repeating collection or the 
     globalThis,
     'fetch',
     async (url: string, init: RequestInit) => {
+      if (String(url).includes('push2delay.eastmoney.com/api/qt/stock/get'))
+        return Response.json({
+          data: {
+            f43: 1356,
+            f59: 2,
+            f170: 123,
+            f116: 1e8,
+            f86: Math.floor(Date.now() / 1000),
+          },
+        });
       assert.equal(url, 'https://api.openai.com/v1/responses');
       assert.equal(typeof init.body, 'string');
       const body = JSON.parse(init.body as string);
+      if (body.model === 'gpt-5.4-mini') {
+        assert.equal(typeof body.instructions, 'string');
+        assert.equal(typeof body.input, 'string');
+        assert.equal(body.prompt_cache_options, undefined);
+      } else {
+        assert.equal(body.instructions, undefined);
+        assert.deepEqual(body.prompt_cache_options, {
+          mode: 'explicit',
+          ttl: '30m',
+        });
+        assert.equal(body.input[0].role, 'developer');
+        assert.deepEqual(body.input[0].content[0].prompt_cache_breakpoint, {
+          mode: 'explicit',
+        });
+        assert.equal(
+          body.input[1].content[0].prompt_cache_breakpoint,
+          undefined,
+        );
+      }
       const name = body.text.format.name as string;
       let data: unknown;
       if (name.includes('evidence')) {
         calls.collect++;
         assert.equal(body.max_tool_calls, 2);
+        assert.ok(!body.input[1].content[0].text.includes('敏感自定义问题'));
         data = { findings: [], missing: [] };
       } else if (name.includes('business')) {
         calls.business++;
@@ -352,6 +388,98 @@ void test('a timed-out writing half resumes without repeating collection or the 
     const reused = await generateCompanyResearch(input);
     assert.equal(reused.usage.length, 0);
     assert.deepEqual(calls, { collect: 1, business: 1, finance: 2 });
+    // A different user's model/question reuses public collection but not prose.
+    const other = {
+      ...input,
+      userId: 'different-user',
+      model: 'gpt-6-astra',
+      query: '敏感自定义问题',
+    };
+    const otherBase = await researchCheckpointKey({
+      ...other,
+      listingId: listing.id,
+    });
+    const http = await readResearchCheckpoint(`${baseKey}:http`);
+    await saveResearchCheckpoint(`${otherBase}:http`, http);
+    const switched = await generateCompanyResearch(other);
+    assert.deepEqual(calls, { collect: 1, business: 2, finance: 3 });
+    assert.equal(switched.usage.length, 2);
+    const publicKey = await publicEvidenceKey(listing.id, dossier);
+    const publicValue = await readDataSnapshot(publicKey);
+    assert.ok(
+      publicValue && !JSON.stringify(publicValue).includes('敏感自定义问题'),
+    );
+    assert.ok(!JSON.stringify(publicValue).includes('userId'));
+    await storeDataSnapshot(
+      publicKey,
+      'public-research-evidence',
+      publicValue!.value,
+      -1,
+      'expired test',
+      '',
+    );
+    const next = { ...other, userId: 'after-expiry' };
+    const nextBase = await researchCheckpointKey({
+      ...next,
+      listingId: listing.id,
+    });
+    await saveResearchCheckpoint(`${nextBase}:http`, http);
+    await generateCompanyResearch(next);
+    assert.deepEqual(calls, { collect: 2, business: 3, finance: 4 });
+    const legacy = {
+      ...input,
+      userId: 'legacy-model-user',
+      model: 'gpt-5.4-mini',
+    };
+    const legacyBase = await researchCheckpointKey({
+      ...legacy,
+      listingId: listing.id,
+    });
+    await saveResearchCheckpoint(`${legacyBase}:http`, http);
+    await generateCompanyResearch(legacy);
+    assert.deepEqual(calls, { collect: 2, business: 4, finance: 5 });
+    // Complete dated HTTP materials bypass the paid collect path entirely.
+    const coveredDossier = structuredClone(dossier);
+    coveredDossier.fetchedAt = new Date().toISOString();
+    coveredDossier.attempts = [];
+    coveredDossier.documents = [
+      {
+        ...dossier.documents[0],
+        title: `${new Date().getUTCFullYear()}年半年度报告`,
+        date: new Date().toISOString(),
+        excerpts: [
+          {
+            page: 1,
+            text: '分产品营业收入、同行业公司测试股份有限公司、行业需求政策、联营企业权益法、关联交易和受限资金。'.repeat(
+              6,
+            ),
+          },
+        ],
+      },
+    ];
+    const covered = { ...input, userId: 'covered-user' };
+    const coveredBase = await researchCheckpointKey({
+      ...covered,
+      listingId: listing.id,
+    });
+    await saveResearchCheckpoint(`${coveredBase}:http`, {
+      ...(http as object),
+      dossier: coveredDossier,
+    });
+    const direct = await generateCompanyResearch(covered);
+    assert.deepEqual(calls, { collect: 2, business: 5, finance: 6 });
+    assert.equal(direct.usage.length, 2);
+    assert.equal(direct.report.deepResearch?.chapters.length, 6);
+    // Restoring prose never freezes the quote or spends additional AI tokens.
+    const saved = await readResearchCheckpoint<{ quote: { asOf: string } }>(
+      `${coveredBase}:ready`,
+    );
+    saved!.quote.asOf = '2020-01-01T00:00:00Z';
+    await saveResearchCheckpoint(`${coveredBase}:ready`, saved);
+    const freshQuote = await generateCompanyResearch(covered);
+    assert.equal(freshQuote.report.quote.price, '13.56');
+    assert.equal(freshQuote.usage.length, 0);
+    assert.deepEqual(calls, { collect: 2, business: 5, finance: 6 });
   } finally {
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalKey;

@@ -1,5 +1,9 @@
 import { eastmoneyJson, fetchWithTimeout } from '@/lib/a-stock-http';
 import { abortable, requestDeadline } from '@/lib/request-deadline';
+import { sourceDate } from '@/lib/a-stock-quotes';
+import { getBseQuote } from '@/lib/a-stock-bse';
+import { getCachedTradingSession } from '@/lib/a-stock-official';
+import { quoteDateStale } from '@/lib/official-data-types';
 import {
   cachedIdentity,
   cachedSearch,
@@ -290,11 +294,6 @@ async function searchUncachedSecurities(
 
 export class InvalidSecurityQueryError extends Error {}
 
-function parseTencentRow(text: string) {
-  const match = text.match(/="([\s\S]*?)"/);
-  return match ? match[1].split('~') : [];
-}
-
 async function getTencentQuote(
   listing: ListingOption,
   signal?: AbortSignal,
@@ -312,11 +311,15 @@ async function getTencentQuote(
       },
       cf: { cacheTtl: 20, cacheEverything: true },
     } as RequestInit & { cf: { cacheTtl: number; cacheEverything: boolean } },
-    8_000,
+    identity.market === 'BJ' ? 2_500 : 8_000,
   );
   if (!response.ok) return null;
-  const row = parseTencentRow(await response.text());
+  const text = new TextDecoder('gbk').decode(await response.arrayBuffer());
+  const match = text.match(new RegExp(`v_${symbol}="([^";]*)"`));
+  const row = match ? match[1].split('~') : [];
   if (row.length < 53) return null;
+  const stamp = sourceDate(row[30] || '');
+  if (row[2] !== identity.code || !stamp) return null;
   const price = Number(row[3]);
   const previousClose = Number(row[4]);
   const percent = Number(row[32]);
@@ -342,15 +345,7 @@ async function getTencentQuote(
       Number.isFinite(marketCap) && marketCap > 0
         ? `${marketCap.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}亿元`
         : '待核验',
-    asOf: `${new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(new Date())}（北京时间）`,
+    asOf: stamp.iso,
     sourceName: '腾讯行情',
     sourceUrl: `https://gu.qq.com/${prefix}${identity.code}/gp`,
     isStale,
@@ -374,32 +369,67 @@ function formatMarketCap(value: unknown, currency: string) {
   return `${(value / 100_000_000).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}${unit}`;
 }
 
-function formatAsOf(value: unknown) {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)
-    return '最新行情快照';
-  return new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(new Date(value * 1000));
-}
-
 export async function getVerifiedQuote(
   listing: ListingOption,
   signal?: AbortSignal,
 ): Promise<VerifiedQuote | null> {
   const deadline = requestDeadline(10_000, signal);
+  const sessionTask = listingAStockIdentity(listing)
+    ? getCachedTradingSession(deadline.signal)
+    : Promise.resolve(null);
+  const verifyDate = async (quote: VerifiedQuote) => {
+    const session = await sessionTask;
+    return quoteDateStale(quote.asOf, session)
+      ? {
+          ...quote,
+          isStale: true,
+          staleReason:
+            '来源行情日期落后于应有交易日；仅保留历史观察值，不代表实时价格。',
+        }
+      : quote;
+  };
   try {
+    let oldPrimary: VerifiedQuote | null = null;
     if (listingAStockIdentity(listing)) {
       try {
         const quote = await getTencentQuote(listing, deadline.signal);
-        if (quote) return quote;
+        if (quote) {
+          const verified = await verifyDate(quote);
+          if (
+            listing.exchangeCode !== 'BJ' ||
+            !quoteDateStale(quote.asOf, await sessionTask)
+          )
+            return verified;
+          oldPrimary = verified;
+        }
       } catch {}
     }
+    if (listing.exchangeCode === 'BJ') {
+      try {
+        const quote = await getBseQuote(`bj${listing.code}`, deadline.signal);
+        if (oldPrimary && Date.parse(oldPrimary.asOf) >= Date.parse(quote.asOf))
+          return oldPrimary;
+        return {
+          price: quote.price.toFixed(2),
+          change:
+            quote.percent === null
+              ? '--'
+              : `${quote.percent >= 0 ? '+' : ''}${quote.percent.toFixed(2)}%`,
+          currency: 'CNY',
+          marketCap: '待核验',
+          asOf: quote.asOf,
+          sourceName: quote.sourceName!,
+          sourceUrl: quote.sourceUrl!,
+          isStale: quote.sourceStale || quote.inactive,
+          staleReason: quote.sourceStale
+            ? '官方报价时效未通过核验，请以标注的来源时间为准。'
+            : quote.inactive
+              ? '当前无成交，请核对停牌或开市状态。'
+              : undefined,
+        };
+      } catch {}
+    }
+    if (oldPrimary) return oldPrimary;
     deadline.signal.throwIfAborted();
     const url = new URL('https://push2delay.eastmoney.com/api/qt/stock/get');
     url.searchParams.set('secid', listing.quoteId);
@@ -423,7 +453,15 @@ export async function getVerifiedQuote(
       data?: Record<string, unknown> | null;
     };
     const data = payload.data;
-    if (!data || typeof data.f43 !== 'number') return null;
+    if (
+      !data ||
+      typeof data.f43 !== 'number' ||
+      data.f43 <= 0 ||
+      typeof data.f86 !== 'number' ||
+      !Number.isFinite(data.f86) ||
+      data.f86 <= 0
+    )
+      return null;
     const decimals = typeof data.f59 === 'number' ? data.f59 : 2;
     const price = data.f43 / 10 ** decimals;
     const percent = typeof data.f170 === 'number' ? data.f170 / 100 : null;
@@ -432,7 +470,7 @@ export async function getVerifiedQuote(
     const amount = typeof data.f48 === 'number' ? data.f48 : null;
     const isStale =
       amount === 0 && previousClose !== null && price === previousClose;
-    return {
+    return await verifyDate({
       price: price.toLocaleString('zh-CN', {
         minimumFractionDigits: Math.min(decimals, 2),
         maximumFractionDigits: decimals,
@@ -443,14 +481,14 @@ export async function getVerifiedQuote(
           : `${percent >= 0 ? '+' : ''}${percent.toFixed(2)}%`,
       currency: listing.currency,
       marketCap: formatMarketCap(data.f116, listing.currency),
-      asOf: `${formatAsOf(data.f86)}（北京时间）`,
+      asOf: new Date(data.f86 * 1000).toISOString(),
       sourceName: '东方财富行情',
       sourceUrl: `https://quote.eastmoney.com/unify/r/${listing.quoteId}`,
       isStale,
       staleReason: isStale
         ? '成交额为0且最新价等于昨收，可能处于停牌、未开盘或旧代码状态。'
         : undefined,
-    };
+    });
   } catch {
     return null;
   } finally {

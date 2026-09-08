@@ -1,6 +1,141 @@
 import type { FinancialPeriod } from '@/lib/research-dossier';
 import type { CompanyMetric, DeepResearch } from '@/lib/research-types';
 
+export function financialAmount(value: string | undefined): number | null {
+  if (
+    typeof value !== 'string' ||
+    !/^[+-]?(?:\d+(?:\.\d+)?|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\.\d+)元$/.test(
+      value.trim(),
+    )
+  )
+    return null;
+  const n = Number(value.trim().slice(0, -1).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+function financialFieldEvidence(
+  rows: FinancialPeriod[],
+  statement: string,
+  aliases: string[],
+) {
+  const entries = rows
+    .filter(
+      (row) =>
+        row.statement === statement &&
+        (!row.currency || row.currency === 'CNY') &&
+        (!row.unit || row.unit === '元') &&
+        (!row.scope || row.scope === '合并') &&
+        (!row.basis ||
+          row.basis === (statement === 'fzb' ? '期末余额' : '年初累计')),
+    )
+    .flatMap((row) => {
+      const key = aliases.find((name) => row.values[name] !== undefined);
+      const value = financialAmount(key ? row.values[key] : undefined);
+      return value === null
+        ? []
+        : [{ value, key: key!, sourceUrl: row.sourceUrl }];
+    });
+  return entries.length && new Set(entries.map((x) => x.value)).size === 1
+    ? entries[0]
+    : null;
+}
+const financialField = (
+  rows: FinancialPeriod[],
+  statement: string,
+  names: string[],
+) => financialFieldEvidence(rows, statement, names)?.value ?? null;
+
+export function buildTtmFinancialTrend(
+  rows: FinancialPeriod[],
+): NonNullable<DeepResearch['financialTrend']>[number] | null {
+  const latest = selectedFinancialPeriods(rows)[0];
+  if (!latest || latest.endsWith('12-31')) return null;
+  const year = Number(latest.slice(0, 4));
+  const periods = [
+    `${year - 1}-12-31`,
+    latest,
+    `${year - 1}${latest.slice(4)}`,
+  ];
+  const used = rows.filter((row) => periods.includes(row.period));
+  if (!used.some((row) => row.statement === 'lrb' || row.statement === 'llb'))
+    return null;
+  const details: string[] = [];
+  const sourceUrls = new Set<string>();
+  const calculate = (label: string, statement: string, names: string[]) => {
+    if (label === '营业收入') {
+      const common = names.find((name) =>
+        periods.every((period) =>
+          used.some(
+            (row) =>
+              row.period === period &&
+              row.statement === statement &&
+              financialAmount(row.values[name]) !== null,
+          ),
+        ),
+      );
+      if (!common) {
+        details.push(
+          '营业收入：三期没有一致的收入科目，不混加营业收入与营业总收入。',
+        );
+        return '未取得';
+      }
+      names = [common];
+    }
+    const inputs = periods.map((period) => {
+      const candidates = used.filter(
+        (row) => row.period === period && row.statement === statement,
+      );
+      if (
+        !candidates.length ||
+        candidates.some(
+          (row) =>
+            row.currency !== 'CNY' ||
+            row.unit !== '元' ||
+            row.scope !== '合并' ||
+            row.basis !== '年初累计',
+        )
+      )
+        return null;
+      return financialFieldEvidence(candidates, statement, names);
+    });
+    const missing = periods.filter((_, i) => inputs[i] === null);
+    if (missing.length) {
+      details.push(
+        `${label}：${missing.join('、')}缺失、冲突或口径未核实，未计算。`,
+      );
+      return '未取得';
+    }
+    for (const input of inputs) if (input) sourceUrls.add(input.sourceUrl);
+    const [annual, current, prior] = inputs.map((x) => x!.value);
+    const result = annual + current - prior;
+    details.push(
+      `${label}（元）：${periods[0]} ${annual}＋${periods[1]} ${current}−${periods[2]} ${prior}＝${result}。`,
+    );
+    return `${(result / 1e8).toFixed(2)}亿元`;
+  };
+  const revenue = calculate('营业收入', 'lrb', ['营业收入', '营业总收入']);
+  const netProfit = calculate('归母净利润', 'lrb', [
+    '归属于母公司所有者的净利润',
+    '归属于母公司股东的净利润',
+  ]);
+  const operatingCashFlow = calculate('经营现金流', 'llb', [
+    '经营活动产生的现金流量净额',
+  ]);
+  if (
+    [revenue, netProfit, operatingCashFlow].every((value) => value === '未取得')
+  )
+    return null;
+  return {
+    period: `截至${latest}（TTM，人民币，合并口径）`,
+    revenue,
+    netProfit,
+    operatingCashFlow,
+    cashAndDebt: '不适用：余额科目不作 TTM 相加，见各期期末数据。',
+    interpretation: `${details.join(' ')}基于本轮可得报表计算近十二个月，不是全年预测；来源未提供公布日时，不支持历史时点回放。`,
+    sourceUrls: [...sourceUrls],
+  };
+}
+
 // Display core accounting numbers from the data adapter, never from generated
 // prose. Comparison labels deliberately avoid silently annualizing interim data.
 export function buildFinancialMetrics(
@@ -28,13 +163,13 @@ export function buildFinancialMetrics(
     ],
   ];
   return fields.flatMap(([label, statement, aliases]) => {
-    const row = rows.find(
-      (r) => r.period === latest && r.statement === statement,
+    const field = financialFieldEvidence(
+      rows.filter((r) => r.period === latest),
+      statement,
+      aliases,
     );
-    const key = aliases.find((k) => row?.values[k] !== undefined);
-    if (!row || !key) return [];
-    const raw = Number(row.values[key].replace(/元$/, '').replace(/,/g, ''));
-    if (!Number.isFinite(raw)) return [];
+    if (!field) return [];
+    const raw = field.value;
     return [
       {
         label,
@@ -42,7 +177,7 @@ export function buildFinancialMetrics(
         period: `${latest}（${statement === 'fzb' ? '期末余额' : latest.endsWith('12-31') ? '全年累计' : '年初至期末累计'}，合并口径）`,
         change: '同期对照见财务趋势',
         assessment: '由原始财报接口换算，经营含义见财务分析。',
-        sourceUrl: row.sourceUrl,
+        sourceUrl: field.sourceUrl,
       },
     ];
   });
@@ -50,6 +185,7 @@ export function buildFinancialMetrics(
 
 export function buildFinancialOverview(rows: FinancialPeriod[]) {
   return buildFinancialTrend(rows)
+    .filter((row) => !row.period.includes('TTM'))
     .slice(0, 2)
     .map(
       (r) =>
@@ -79,19 +215,10 @@ export function buildFinancialTrend(
 ): NonNullable<DeepResearch['financialTrend']> {
   const yi = (n: number | null) =>
     n === null ? '未取得' : `${(n / 1e8).toFixed(2)}亿元`;
-  return selectedFinancialPeriods(rows).map((period) => {
+  const trend = selectedFinancialPeriods(rows).map((period) => {
     const selected = rows.filter((x) => x.period === period);
     const get = (statement: string, names: string[]) => {
-      const values =
-        selected.find((x) => x.statement === statement)?.values || {};
-      for (const name of names) {
-        if (!(name in values)) continue;
-        const value = Number(
-          values[name].replace(/元(?:\/股)?$/, '').replace(/,/g, ''),
-        );
-        if (Number.isFinite(value)) return value;
-      }
-      return null;
+      return financialField(selected, statement, names);
     };
     const revenue = get('lrb', ['营业收入', '营业总收入']);
     const cost = get('lrb', ['营业成本']);
@@ -141,4 +268,6 @@ export function buildFinancialTrend(
       sourceUrls: [...new Set(selected.map((x) => x.sourceUrl))],
     };
   });
+  const ttm = buildTtmFinancialTrend(rows);
+  return ttm ? [...trend, ttm] : trend;
 }

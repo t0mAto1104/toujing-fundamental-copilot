@@ -1,7 +1,7 @@
 import { readDataSnapshot, storeDataSnapshot } from '@/lib/data-snapshot-cache';
 
 export const RESEARCH_CHECKPOINT_TTL = 60 * 60 * 1000;
-export const RESEARCH_PIPELINE_VERSION = 'bounded-split-v1';
+export const RESEARCH_PIPELINE_VERSION = 'task-budget-evidence-v3';
 
 export async function researchCheckpointKey(input: {
   userId: string;

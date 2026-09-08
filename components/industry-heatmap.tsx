@@ -1,5 +1,7 @@
 'use client';
 
+/* oxlint-disable next/no-html-link-for-pages -- retain reliable full navigation. */
+
 import { Database, Info, MousePointer2, RefreshCw, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -189,6 +191,12 @@ export function IndustryHeatmap() {
                     {money(active.mainNetFlow)}
                     。为实时行情事实，不替代财报与产业证据。
                   </p>
+                  <a
+                    href={`/quotes?view=industry&board=${encodeURIComponent(active.code)}`}
+                    className="mt-2 inline-block text-sm text-primary"
+                  >
+                    查看行业股票排行 →
+                  </a>
                 </div>
                 <div className="min-w-40 rounded-md bg-muted/70 px-3 py-2">
                   <p className="text-[9px] text-muted-foreground">

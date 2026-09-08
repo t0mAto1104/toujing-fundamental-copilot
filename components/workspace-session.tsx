@@ -8,6 +8,7 @@ export type SessionUser = {
   email?: string;
   isAdmin?: boolean;
   allowedAIModels?: AIModelId[];
+  modelPolicyUnavailable?: boolean;
 } | null;
 
 const WorkspaceSessionContext = createContext<{ user: SessionUser }>({

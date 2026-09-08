@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { registerHooks } from 'node:module';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
 
 // Exercise the real route handlers and SQL against isolated SQLite. Only the
 // platform headers/binding are adapted; no production users or reports mutate.
@@ -26,8 +27,19 @@ const state = {
   env: {
     DB: {
       prepare,
-      batch: (statements: ReturnType<typeof prepare>[]) =>
-        Promise.all(statements.map((x) => x.run())),
+      batch: async (statements: ReturnType<typeof prepare>[]) => {
+        sqlite.exec('BEGIN');
+        try {
+          const results = [];
+          for (const statement of statements)
+            results.push(await statement.run());
+          sqlite.exec('COMMIT');
+          return results;
+        } catch (error) {
+          sqlite.exec('ROLLBACK');
+          throw error;
+        }
+      },
     },
   },
 };
@@ -57,6 +69,15 @@ globalThis.fetch = async () => {
 };
 const reports = await import('../app/api/reports/route');
 const access = await import('../lib/site-users');
+const session = await import('../app/api/session/route');
+const { ensureReportDatabase } = await import('../lib/report-database');
+await ensureReportDatabase(state.env.DB as unknown as D1Database);
+// Apply the generated, additive migration to the legacy schema, just as hosting
+// does before worker upload. Old rows retain NULL (unknown) cost metadata.
+sqlite.exec(readFileSync('drizzle/0004_ai_usage_cost_details.sql', 'utf8'));
+sqlite.exec(readFileSync('drizzle/0003_market_watchlist.sql', 'utf8'));
+sqlite.exec(readFileSync('drizzle/0005_research_workbench.sql', 'utf8'));
+sqlite.exec(readFileSync('drizzle/0006_research_task_identity.sql', 'utf8'));
 const request = (path: string, body?: unknown) =>
   new Request(
     `https://qa.invalid${path}`,
@@ -153,6 +174,18 @@ void test('quota, pause and model restrictions remain enforced in actual SQL', a
     .run('["gpt-5.6-luna"]', 'limited-user');
   context = await access.requireResearchAccess();
   assert.throws(
+    () => access.resolvePermittedAIModel(context, 'gpt-6-astra'),
+    /不能使用/,
+  );
+  sqlite
+    .prepare('UPDATE users SET allowed_ai_models=? WHERE id=?')
+    .run('["gpt-6-astra"]', 'limited-user');
+  context = await access.requireResearchAccess();
+  assert.equal(
+    access.resolvePermittedAIModel(context, 'gpt-6-astra'),
+    'gpt-6-astra',
+  );
+  assert.throws(
     () => access.resolvePermittedAIModel(context, 'gpt-5.6-sol'),
     /不能使用/,
   );
@@ -169,4 +202,250 @@ void test('quota, pause and model restrictions remain enforced in actual SQL', a
     .run('limited-user');
   await access.consumeDailyResearchQuota(await access.requireResearchAccess());
   assert.equal(networkCalls, 0);
+});
+
+void test('a pending or failed initializer never poisons later requests or another binding', async () => {
+  let calls = 0;
+  let rejectFirst!: (error: Error) => void;
+  const database = {
+    prepare,
+    batch: (statements: ReturnType<typeof prepare>[]) => {
+      calls++;
+      return calls === 1
+        ? new Promise<never>((_, reject) => {
+            rejectFirst = reject;
+          })
+        : Promise.all(statements.map((x) => x.run()));
+    },
+  } as unknown as D1Database;
+  const first = assert.rejects(
+    ensureReportDatabase(database),
+    /owner canceled/,
+  );
+  try {
+    const { within } = await import('../lib/request-deadline');
+    await within(ensureReportDatabase(database), 500);
+    assert.equal(calls, 2, 'second request runs its own I/O');
+  } finally {
+    rejectFirst(new Error('owner canceled'));
+    await first;
+  }
+  await ensureReportDatabase(database);
+  assert.equal(calls, 2, 'only completed state is reused');
+
+  let otherCalls = 0;
+  const other = {
+    prepare,
+    batch: async (statements: ReturnType<typeof prepare>[]) => {
+      if (++otherCalls === 1) throw new Error('temporary failure');
+      return Promise.all(statements.map((x) => x.run()));
+    },
+  } as unknown as D1Database;
+  await assert.rejects(ensureReportDatabase(other), /temporary failure/);
+  await ensureReportDatabase(other);
+  assert.equal(otherCalls, 2, 'a different binding initializes and can retry');
+});
+
+void test('session has a deadline for both user write and policy read; identity survives', async (t) => {
+  login('session-user');
+  await access.touchSiteUser({
+    userId: 'session-user',
+    email: 'session-user@qa.invalid',
+    displayName: 'Session User',
+    fullName: 'Session User',
+  });
+  for (const stalled of ['INSERT INTO users', 'SELECT allowed_ai_models']) {
+    const original = state.env.DB.prepare;
+    const mock = t.mock.method(state.env.DB, 'prepare', (sql: string) => {
+      if (!sql.includes(stalled)) return original(sql);
+      const pending = () => new Promise<never>(() => {});
+      const statement = {
+        bind: () => statement,
+        run: pending,
+        all: pending,
+        first: pending,
+      };
+      return statement;
+    });
+    const start = Date.now();
+    const response = await session.GET();
+    assert.ok(
+      Date.now() - start < 2_800,
+      'display lookup is bounded at two seconds',
+    );
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    const { user } = (await response.json()) as {
+      user: {
+        email: string;
+        modelPolicyUnavailable: boolean;
+        allowedAIModels: string[];
+      };
+    };
+    assert.equal(user.email, 'session-user@qa.invalid');
+    assert.equal(user.modelPolicyUnavailable, true);
+    assert.deepEqual(
+      user.allowedAIModels,
+      [],
+      'unavailable never grants model access',
+    );
+    mock.mock.restore();
+  }
+  const recovered = await session.GET();
+  assert.equal(recovered.status, 200);
+  assert.equal(
+    ((await recovered.json()) as { user: { modelPolicyUnavailable: boolean } })
+      .user.modelPolicyUnavailable,
+    false,
+  );
+  login(null);
+  assert.deepEqual(await (await session.GET()).json(), { user: null });
+  assert.equal(networkCalls, 0);
+});
+
+void test('paid routes fail closed when the database fails, without a model request', async (t) => {
+  login('session-user');
+  t.mock.method(state.env.DB, 'prepare', () => {
+    throw new Error('D1 unavailable');
+  });
+  const route = await import('../app/api/chat/route');
+  const response = await route.POST(
+    request('/api/chat', { message: '分析市场' }),
+  );
+  assert.equal(response.status, 503);
+  assert.equal(networkCalls, 0);
+});
+
+void test('admin reads time out, preserve access checks and recover without restarting', async (t) => {
+  const admin = await import('../app/api/admin/users/route');
+  login(null);
+  assert.equal((await admin.GET()).status, 403);
+  login('session-user');
+  const originalEmails = process.env.SITE_ADMIN_EMAILS;
+  process.env.SITE_ADMIN_EMAILS = 'session-user@qa.invalid';
+  try {
+    const original = state.env.DB.prepare;
+    const mock = t.mock.method(state.env.DB, 'prepare', (sql: string) => {
+      if (!sql.includes('SELECT u.id')) return original(sql);
+      const pending = () => new Promise<never>(() => {});
+      const statement = {
+        bind: () => statement,
+        run: pending,
+        all: pending,
+        first: pending,
+      };
+      return statement;
+    });
+    const start = Date.now();
+    const response = await admin.GET();
+    assert.equal(response.status, 503);
+    assert.ok(Date.now() - start < 6_800);
+    assert.match(
+      ((await response.json()) as { error: string }).error,
+      /稍后重试/,
+    );
+    mock.mock.restore();
+    assert.equal((await admin.GET()).status, 200);
+    assert.equal(networkCalls, 0);
+  } finally {
+    if (originalEmails === undefined) delete process.env.SITE_ADMIN_EMAILS;
+    else process.env.SITE_ADMIN_EMAILS = originalEmails;
+  }
+});
+
+void test('usage migration and real response parser retain caches, task ID and unknown costs', async (t) => {
+  login('cost-user');
+  await access.requireResearchAccess();
+  const { runStructuredResearch } = await import('../lib/openai');
+  const oldKey = process.env.OPENAI_API_KEY;
+  const oldAdmins = process.env.SITE_ADMIN_EMAILS;
+  process.env.OPENAI_API_KEY = 'offline-test-not-a-key';
+  process.env.SITE_ADMIN_EMAILS = 'cost-user@qa.invalid';
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({
+      status: 'completed',
+      service_tier: 'default',
+      output: [
+        {
+          type: 'message',
+          content: [{ type: 'output_text', text: '{"ok":true}' }],
+        },
+        ...Array.from({ length: 3 }, () => ({ type: 'web_search_call' })),
+      ],
+      usage: {
+        input_tokens: 10_000,
+        input_tokens_details: {
+          cached_tokens: 2_000,
+          cache_write_tokens: 3_000,
+        },
+        output_tokens: 1_000,
+        output_tokens_details: { reasoning_tokens: 500 },
+        total_tokens: 11_000,
+      },
+    }),
+  );
+  try {
+    await runStructuredResearch({
+      name: 'offline_cost',
+      schema: {},
+      prompt: 'test',
+      model: 'gpt-6-astra',
+      audit: {
+        userId: 'cost-user',
+        endpoint: '/api/analyze:collect',
+        researchTaskId: 'test-report-group',
+      },
+    });
+    const { recordAIUsage } = await import('../lib/ai-usage');
+    await recordAIUsage({
+      userId: 'cost-user',
+      endpoint: '/api/analyze:write-finance',
+      model: 'gpt-6-astra',
+      status: 'network_error',
+      errorCode: 'timeout_usage_unknown',
+      researchTaskId: 'test-report-group',
+    });
+    const events = sqlite
+      .prepare(
+        'SELECT * FROM ai_usage_events WHERE user_id = ? ORDER BY created_at',
+      )
+      .all('cost-user');
+    assert.equal(events.length, 2);
+    assert.equal(events[0].cached_input_tokens, 2_000);
+    assert.equal(events[0].cache_write_tokens, 3_000);
+    assert.equal(events[0].web_search_requests, 3);
+    assert.equal(events[0].total_tokens, 11_000);
+    assert.equal(events[0].research_task_id, events[1].research_task_id);
+    assert.ok(Math.abs(Number(events[0].estimated_cost_usd) - 0.1695) < 1e-10);
+    assert.equal(events[1].estimated_cost_usd, null);
+    assert.equal(events[1].cached_input_tokens, null);
+    const admin = await import('../app/api/admin/users/route');
+    const response = await admin.GET();
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      usageEvents: Array<{
+        userId: string;
+        estimatedCostUsd: number | null;
+        researchTaskId: string;
+        usageKnown: boolean;
+      }>;
+      usageSummary: { unpricedRequestsToday: number };
+    };
+    const saved = payload.usageEvents.filter(
+      (event) => event.userId === 'cost-user',
+    );
+    assert.equal(saved.length, 2);
+    assert.equal(
+      saved.find((event) => event.estimatedCostUsd === null)?.usageKnown,
+      false,
+    );
+    assert.ok(payload.usageSummary.unpricedRequestsToday >= 1);
+    login('non-admin');
+    assert.equal((await admin.GET()).status, 403);
+  } finally {
+    if (oldKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldKey;
+    if (oldAdmins === undefined) delete process.env.SITE_ADMIN_EMAILS;
+    else process.env.SITE_ADMIN_EMAILS = oldAdmins;
+  }
 });

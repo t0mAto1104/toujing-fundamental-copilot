@@ -4,6 +4,7 @@
 
 import {
   BookOpen,
+  ChartCandlestick,
   Bot,
   ChevronDown,
   Compass,
@@ -13,12 +14,14 @@ import {
   LogIn,
   LogOut,
   Monitor,
+  MessagesSquare,
   Moon,
   Settings2,
   ShieldCheck,
   Sun,
   UserRound,
   UsersRound,
+  WalletCards,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -32,6 +35,7 @@ import {
   NativeSelectOption,
 } from '@/components/ui/native-select';
 import { useWorkspaceSession } from '@/components/workspace-session';
+import { SITE_VERSION } from '@/lib/site-version';
 import {
   AI_MODELS,
   DEFAULT_AI_MODEL,
@@ -46,6 +50,14 @@ import {
 
 const navItems = [
   { href: '/', icon: Compass, label: '市场总览', key: 'market' },
+  { href: '/quotes', icon: ChartCandlestick, label: '行情数据', key: 'quotes' },
+  { href: '/signals', icon: WalletCards, label: '资金与事件', key: 'signals' },
+  {
+    href: '/sentiment',
+    icon: MessagesSquare,
+    label: '舆情互动',
+    key: 'sentiment',
+  },
   { href: '/research', icon: Bot, label: 'AI 研究助手', key: 'research' },
   { href: '/industry', icon: LineChart, label: '行业比较', key: 'industry' },
   { href: '/macro', icon: Landmark, label: '宏观政策', key: 'macro' },
@@ -104,6 +116,9 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
     applyTheme(initialTheme);
     const syncPreferences = window.setTimeout(() => {
       setTheme(initialTheme);
+      // An unavailable policy is not an administrator changing the allowlist.
+      // Keep the user's saved model intact until a real policy is available.
+      if (user?.modelPolicyUnavailable) return;
       const preferred = getPreferredAIModel();
       const permitted = allowedModels.some((option) => option.id === preferred)
         ? preferred
@@ -129,7 +144,7 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
       window.clearTimeout(syncPreferences);
       media.removeEventListener('change', syncSystemTheme);
     };
-  }, [allowedModels]);
+  }, [allowedModels, user?.modelPolicyUnavailable]);
 
   const chooseTheme = (nextTheme: Theme) => {
     setTheme(nextTheme);
@@ -255,6 +270,7 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                 id="ai-model-choice"
                 size="sm"
                 value={model}
+                disabled={user?.modelPolicyUnavailable}
                 onChange={(event) =>
                   chooseModel(event.target.value as AIModelId)
                 }
@@ -276,6 +292,7 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                 id="research-model-choice"
                 size="sm"
                 value={researchModel}
+                disabled={user?.modelPolicyUnavailable}
                 onChange={(event) => {
                   const next = event.target.value as AIModelId;
                   setResearchModel(next);
@@ -294,9 +311,11 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                 Sol，费用高于普通问答；仅手动发起时运行。受管理员允许模型范围约束。
               </p>
               <p className="mt-1.5 text-[9px] leading-4 text-muted-foreground">
-                {user?.allowedAIModels
-                  ? `管理员允许 ${allowedModels.length} 个模型；服务端会强制校验。`
-                  : '登录后由管理员策略决定可选模型。'}
+                {user?.modelPolicyUnavailable
+                  ? '模型权限暂时无法加载，请稍后刷新页面重试。登录状态不受影响。'
+                  : user?.allowedAIModels
+                    ? `管理员允许 ${allowedModels.length} 个模型；服务端会强制校验。`
+                    : '登录后由管理员策略决定可选模型。'}
               </p>
               <fieldset
                 className="mt-2 grid grid-cols-3 gap-px border border-border"
@@ -334,6 +353,12 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
         </div>
         <p className="px-1 text-[9px] leading-4 text-muted-foreground">
           仅供信息参考，不构成投资建议
+        </p>
+        <p
+          className="px-1 text-xs text-muted-foreground"
+          aria-label={`当前版本 ${SITE_VERSION}`}
+        >
+          {SITE_VERSION}
         </p>
       </div>
     </>

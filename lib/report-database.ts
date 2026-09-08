@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
+import { within } from '@/lib/request-deadline';
 
-let schemaReady: Promise<void> | null = null;
+// Cache completed state only: pending D1 I/O belongs to its originating request.
+const readyDatabases = new WeakSet<D1Database>();
 
 export function getReportDatabase(): D1Database | null {
   return (env as unknown as { DB?: D1Database }).DB || null;
@@ -126,11 +128,7 @@ async function initializeDatabase(database: D1Database) {
 }
 
 export async function ensureReportDatabase(database: D1Database) {
-  if (!schemaReady) {
-    schemaReady = initializeDatabase(database).catch((error) => {
-      schemaReady = null;
-      throw error;
-    });
-  }
-  await schemaReady;
+  if (readyDatabases.has(database)) return;
+  await within(initializeDatabase(database), 4_000);
+  readyDatabases.add(database);
 }

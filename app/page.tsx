@@ -13,10 +13,14 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTradingSession } from '@/components/trading-session';
+import { marketPollInterval } from '@/lib/official-data-types';
+import { deduplicateNews } from '@/lib/news-evidence';
 
 import { BrandMark } from '@/components/brand-mark';
 import { IndustryHeatmap } from '@/components/industry-heatmap';
 import { IndustryReports } from '@/components/industry-reports';
+import { HotStocks } from '@/components/market-signals';
 import { CompanySearchField } from '@/components/company-search-field';
 import { Button } from '@/components/ui/button';
 import { WorkspaceNav } from '@/components/workspace-nav';
@@ -77,6 +81,8 @@ type MarketBrief = {
   marketView: string;
   marketTone: string;
   news: BriefNews[];
+  macroNews?: BriefNews[];
+  macroHistory?: { from: string; complete: boolean; stale: boolean };
   stockReasons: BriefReason[];
   sectorReasons: BriefReason[];
   drivers?: Array<{
@@ -152,6 +158,12 @@ export default function Home() {
   const [brief, setBrief] = useState<MarketBrief>(fallbackBrief);
   const [refreshing, setRefreshing] = useState(false);
   const [marketError, setMarketError] = useState(false);
+  const session = useTradingSession();
+  const marketInterval = useRef(60_000);
+  useEffect(() => {
+    marketInterval.current = marketPollInterval(session, 60_000);
+  }, [session]);
+  const marketRunning = useRef(false);
   const [aiStatus, setAIStatus] = useState<AIStatus | null>(null);
   const policyScrollRef = useRef<HTMLDivElement>(null);
 
@@ -188,6 +200,8 @@ export default function Home() {
   };
 
   const loadMarket = async () => {
+    if (document.hidden || marketRunning.current) return;
+    marketRunning.current = true;
     setRefreshing(true);
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15_000);
@@ -206,16 +220,23 @@ export default function Home() {
     } finally {
       window.clearTimeout(timeout);
       setRefreshing(false);
+      marketRunning.current = false;
     }
   };
 
   useEffect(() => {
+    let lastAutomatic = Date.now();
     const initialLoad = window.setTimeout(() => {
       void loadMarket();
       void loadFundamentalFeed();
       void loadAIStatus();
     }, 0);
-    const marketTimer = window.setInterval(loadMarket, 60 * 1000);
+    const marketTimer = window.setInterval(() => {
+      if (Date.now() - lastAutomatic >= marketInterval.current) {
+        lastAutomatic = Date.now();
+        void loadMarket();
+      }
+    }, 60_000);
     const feedTimer = window.setInterval(loadFundamentalFeed, 10 * 60 * 1000);
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') void loadMarket();
@@ -256,10 +277,20 @@ export default function Home() {
   }, [brief.news]);
   const displayedPolicyNews = useMemo(
     () =>
-      allNews
+      deduplicateNews([...(brief.macroNews || []), ...allNews], (item) => ({
+        title: item.title,
+        content: item.summary,
+        date: item.publishedAt,
+        url: item.sourceUrl,
+      }))
+        .sort(
+          (a, b) =>
+            publishedTimestamp(b.publishedAt) -
+            publishedTimestamp(a.publishedAt),
+        )
         .filter((item) => item.category === '宏观' || item.category === '政策')
         .slice(0, 18),
-    [allNews],
+    [allNews, brief.macroNews],
   );
   const timelineNews = useMemo(() => allNews.slice(0, 15), [allNews]);
   const latestPolicyKey = displayedPolicyNews[0]
@@ -426,8 +457,17 @@ export default function Home() {
                   宏观与政策信号
                 </h2>
                 <p className="mt-1 text-[10px] text-muted-foreground">
-                  a-stock-data 官方源 · 月频数据按发布日核验
+                  近期宏观政策快讯 · 官方月频数据保留原发布日
                 </p>
+                {brief.macroHistory &&
+                  (!brief.macroHistory.complete ||
+                    brief.macroHistory.stale) && (
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      {brief.macroHistory.stale
+                        ? '历史快讯正在更新，暂展示已核验记录'
+                        : '近期历史快讯尚未完整取回，以下为已核验记录'}
+                    </p>
+                  )}
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -511,6 +551,9 @@ export default function Home() {
           </section>
 
           <IndustryHeatmap />
+          <div className="mt-5">
+            <HotStocks compact />
+          </div>
           <IndustryReports />
           <section className="saas-panel mt-5">
             <div className="saas-panel-header">

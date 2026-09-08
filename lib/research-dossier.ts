@@ -1,4 +1,5 @@
 import { getDocumentProxy } from 'unpdf';
+import { deduplicateNews } from '@/lib/news-evidence';
 import { cninfoOrgId } from '@/lib/a-stock-company';
 import {
   eastmoneyFetch,
@@ -23,6 +24,11 @@ export type EvidenceDocument = SourceLink & {
   cashRestrictions?: CashRestrictionTable[];
 };
 export type FinancialPeriod = {
+  currency?: string;
+  unit?: string;
+  scope?: string;
+  basis?: string;
+  publishedAt?: string;
   period: string;
   statement: string;
   sourceUrl: string;
@@ -574,19 +580,23 @@ export function parseFinancialPeriods(
       period: `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6)}`,
       statement,
       sourceUrl,
+      currency: 'CNY',
+      unit: '元',
+      scope: '合并',
+      basis: statement === 'fzb' ? '期末余额' : '年初累计',
       values: Object.fromEntries(
         (report.data || [])
           .filter(
             (x) =>
               statementFields[statement]?.includes(x.item_title || '') &&
-              x.item_value !== null &&
-              x.item_value !== undefined &&
-              x.item_value !== '' &&
+              (typeof x.item_value === 'number' ||
+                (typeof x.item_value === 'string' &&
+                  x.item_value.trim() !== '')) &&
               Number.isFinite(Number(x.item_value)),
           )
           .map((x) => [
             x.item_title!,
-            `${String(x.item_value)}${x.item_title === '基本每股收益' ? '元/股' : '元'}`,
+            `${Number(x.item_value)}${x.item_title === '基本每股收益' ? '元/股' : '元'}`,
           ]),
       ),
     }))
@@ -666,7 +676,16 @@ async function companyNews(
       }>;
     };
   };
-  return (data.result?.cmsArticleWebOld || [])
+  return deduplicateNews(
+    data.result?.cmsArticleWebOld || [],
+    (x) => ({
+      title: x.title,
+      content: x.content,
+      url: x.url,
+      date: x.date,
+    }),
+    { maxAgeDays: 30 },
+  )
     .filter((x) => /^https?:\/\//.test(x.url) && x.content)
     .slice(0, 8)
     .map((x) => ({

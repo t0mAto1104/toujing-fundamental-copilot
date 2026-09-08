@@ -49,11 +49,39 @@ export async function readStoredReports(): Promise<SavedReport[]> {
 export async function readStoredReport(
   id: string,
 ): Promise<SavedReport | null> {
+  if (id.startsWith('task:')) {
+    const response = await fetch(
+      `/api/research-tasks?id=${encodeURIComponent(id.slice(5))}`,
+      { cache: 'no-store', signal: AbortSignal.timeout(10000) },
+    );
+    if (!response.ok) return null;
+    const data = (await response.json()) as {
+      report: CompanyReport | null;
+      task: { query: string };
+    };
+    const report = data.report as CompanyReport | null;
+    return report
+      ? {
+          id,
+          companyName: report.companyName,
+          companyCode: report.companyCode,
+          exchange: report.exchange,
+          listingId: report.selectedListingId,
+          industry: report.industry,
+          stance: report.stance,
+          quote: report.quote,
+          conclusion: report.conclusion,
+          updatedAt: report.updatedAt,
+          query: data.task.query,
+          report,
+        }
+      : null;
+  }
   const local = readSavedReport(id);
-  if (local?.report) return local;
   try {
     const response = await fetch(`/api/reports?id=${encodeURIComponent(id)}`, {
       cache: 'no-store',
+      signal: AbortSignal.timeout(10000),
     });
     if (response.ok) {
       const payload = (await response.json()) as {
@@ -67,6 +95,8 @@ export async function readStoredReport(
 
 export async function saveReport(report: CompanyReport, query: string) {
   if (typeof window === 'undefined') return;
+  // New reports were atomically archived by the server before delivery.
+  if (report.researchRun?.taskId) return;
   const current = readSavedReports();
   const item: SavedReport = {
     id: `${report.exchange}-${report.companyCode}`,

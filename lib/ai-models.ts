@@ -20,6 +20,11 @@ export const AI_MODELS = [
     description: '新一代综合模型',
   },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: '新一代深度模型' },
+  {
+    id: 'gpt-6-astra',
+    label: 'GPT-6 Astra',
+    description: '复杂研究与推理，成本较高',
+  },
 ] as const;
 
 export type AIModelId = (typeof AI_MODELS)[number]['id'];

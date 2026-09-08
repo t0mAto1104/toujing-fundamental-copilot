@@ -3,6 +3,7 @@ import { Geist, Geist_Mono, Noto_Sans_SC } from 'next/font/google';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { MarketAgentChat } from '@/components/market-agent-chat';
 import { WorkspaceSessionProvider } from '@/components/workspace-session';
+import { TradingSessionProvider } from '@/components/trading-session';
 import { getUserAIModelPolicy, isSiteAdminUser } from '@/lib/site-users';
 import './globals.css';
 
@@ -69,6 +70,7 @@ export default async function RootLayout({
         email: authenticatedUser.email,
         isAdmin: isSiteAdminUser(authenticatedUser),
         allowedAIModels: modelPolicy?.allowedAIModels,
+        modelPolicyUnavailable: modelPolicy?.modelPolicyUnavailable,
       }
     : null;
   return (
@@ -84,8 +86,10 @@ export default async function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} ${notoSansSC.variable} antialiased`}
       >
         <WorkspaceSessionProvider user={user}>
-          {children}
-          <MarketAgentChat context="透镜基本面分析工作台的当前页面" />
+          <TradingSessionProvider>
+            {children}
+            <MarketAgentChat context="透镜基本面分析工作台的当前页面" />
+          </TradingSessionProvider>
         </WorkspaceSessionProvider>
       </body>
     </html>

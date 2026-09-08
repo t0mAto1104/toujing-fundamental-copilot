@@ -4,6 +4,8 @@ import {
   fetchWithTimeout,
   stripHtml,
 } from '@/lib/a-stock-http';
+import { deduplicateNews, eventTransmission } from '@/lib/news-evidence';
+import type { MacroPolicyHistory } from '@/lib/macro-policy-history';
 import {
   type DataSnapshot,
   getOrRefreshDataSnapshot,
@@ -53,6 +55,8 @@ export type FundamentalFeed = {
     sourceUrl: string;
   }>;
   news: FundamentalNewsItem[];
+  macroNews: FundamentalNewsItem[];
+  macroHistory?: { from: string; complete: boolean; stale: boolean };
   stockReasons: [];
   sectorReasons: [];
   methodology: string;
@@ -220,6 +224,7 @@ type SinaFeedItem = {
   create_time?: string;
   docurl?: string;
   ext?: string;
+  tag?: Array<{ id?: string | number }>;
 };
 
 type EastmoneyFastNewsItem = {
@@ -241,7 +246,7 @@ function classifyNews(text: string): FundamentalNewsItem['category'] {
   return '行业';
 }
 
-function implicationFor(category: FundamentalNewsItem['category']) {
+function implicationFor(category: FundamentalNewsItem['category'], text = '') {
   const map = {
     政策: '需继续核验政策细则、执行时间和企业订单传导，政策表述本身不等同于盈利兑现。',
     行业: '需映射到具体公司的订单、价格、市场份额和成本变化，并由后续财报验证。',
@@ -249,12 +254,22 @@ function implicationFor(category: FundamentalNewsItem['category']) {
     财报: '应结合收入质量、利润率、经营现金流、库存与资本开支共同判断盈利质量。',
     宏观: '需按行业敏感度映射到需求、成本与融资环境，不宜从单一总量指标直接外推。',
   };
-  return map[category];
+  return (
+    (category !== '资金' ? eventTransmission(text) : null) || map[category]
+  );
 }
+
+const uniqueNews = (items: FundamentalNewsItem[]) =>
+  deduplicateNews(items, (item) => ({
+    title: item.title,
+    content: item.summary,
+    date: item.publishedAt,
+    url: item.sourceUrl,
+  }));
 
 function titleFromText(text: string) {
   const bracket = /^【([^】]+)】/.exec(text)?.[1];
-  return (bracket || text.split(/[。；]/)[0] || text).slice(0, 70);
+  return bracket || text.split(/[。；]/)[0] || text;
 }
 
 function documentUrl(item: SinaFeedItem) {
@@ -266,12 +281,31 @@ function documentUrl(item: SinaFeedItem) {
   return `https://finance.sina.com.cn/7x24/?id=${item.id || ''}`;
 }
 
-async function fetchSinaFinanceNews() {
+export async function fetchSinaFinanceNewsPage(
+  options: {
+    tag?: '1' | '7';
+    cursor?: number;
+    signal?: AbortSignal;
+  } = {},
+) {
+  const url = new URL('https://zhibo.sina.com.cn/api/zhibo/feed');
+  url.searchParams.set('zhibo_id', '152');
+  url.searchParams.set('page_size', options.tag ? '100' : '30');
+  url.searchParams.set('dire', 'f');
+  if (options.tag) url.searchParams.set('tag_id', options.tag);
+  if (options.cursor) {
+    url.searchParams.set('id', String(options.cursor));
+    url.searchParams.set('type', '1');
+  }
   const payload = await fetchJson<{
-    result?: { data?: { feed?: { list?: SinaFeedItem[] } } };
+    result?: {
+      status?: { code?: number };
+      data?: { feed?: { list?: SinaFeedItem[]; min_id?: number } };
+    };
   }>(
-    'https://zhibo.sina.com.cn/api/zhibo/feed?zhibo_id=152&page_size=30&dire=f',
+    url,
     {
+      signal: options.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0',
         Referer: 'https://finance.sina.com.cn/',
@@ -279,28 +313,50 @@ async function fetchSinaFinanceNews() {
     },
     12_000,
   );
-  const seen = new Set<string>();
-  return (payload.result?.data?.feed?.list || [])
-    .flatMap((item) => {
+  const feed = payload.result?.data?.feed;
+  if (payload.result?.status?.code !== 0 || !Array.isArray(feed?.list))
+    throw new Error('新浪财经资讯响应结构异常');
+  // The API uses tag_id (not tag); reject an ignored category filter.
+  if (
+    options.tag &&
+    feed.list.some(
+      (item) => !item.tag?.some((tag) => String(tag.id) === options.tag),
+    )
+  )
+    throw new Error('新浪宏观分类过滤未生效');
+  const items = uniqueNews(
+    feed.list.flatMap((item) => {
       const text = stripHtml(item.rich_text || '');
       if (!text) return [];
       const title = titleFromText(text);
-      if (seen.has(title)) return [];
-      seen.add(title);
-      const category = classifyNews(text);
+      const inferred = classifyNews(text);
+      const category = options.tag
+        ? inferred === '政策' || options.tag === '7'
+          ? '政策'
+          : '宏观'
+        : inferred;
       return [
         {
           category,
           title,
-          summary: text.replace(/^【[^】]+】/, '').slice(0, 220),
-          implication: implicationFor(category),
+          summary: text.replace(/^【[^】]+】/, ''),
+          implication: implicationFor(category, text),
           sourceName: '新浪财经7×24',
           sourceUrl: documentUrl(item),
           publishedAt: String(item.create_time || '').slice(0, 19),
         } satisfies FundamentalNewsItem,
       ];
-    })
-    .slice(0, 20);
+    }),
+  );
+  return {
+    items,
+    cursor: Number(feed.min_id) || null,
+    rawCount: feed.list.length,
+  };
+}
+
+async function fetchSinaFinanceNews() {
+  return (await fetchSinaFinanceNewsPage()).items.slice(0, 20);
 }
 
 async function fetchEastmoneyFinanceNews() {
@@ -332,9 +388,9 @@ async function fetchEastmoneyFinanceNews() {
     return [
       {
         category,
-        title: title.slice(0, 90),
-        summary: summary.slice(0, 220),
-        implication: implicationFor(category),
+        title,
+        summary,
+        implication: implicationFor(category, `${title} ${summary}`),
         sourceName: '东方财富7×24',
         sourceUrl: item.code
           ? `https://finance.eastmoney.com/a/${item.code}.html`
@@ -354,10 +410,10 @@ async function refreshFinanceNews() {
     ...(eastmoneyResult.status === 'fulfilled' ? eastmoneyResult.value : []),
     ...(sinaResult.status === 'fulfilled' ? sinaResult.value : []),
   ];
-  if (!merged.length) throw new Error('财经资讯主源与备用源均不可用');
-  const seen = new Set<string>();
-  return merged
-    .filter((item) => !seen.has(item.title) && Boolean(seen.add(item.title)))
+  const verified = uniqueNews(merged);
+  if (!verified.length)
+    throw new Error('财经资讯主源与备用源均未返回有效日期的内容');
+  return verified
     .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
     .slice(0, 30);
 }
@@ -387,16 +443,14 @@ export async function getFinanceNewsSnapshot() {
 export function composeFundamentalFeed(
   macro: DataSnapshot<OfficialMacroSnapshot> | null,
   news: DataSnapshot<FundamentalNewsItem[]> | null,
+  history: DataSnapshot<MacroPolicyHistory> | null = null,
 ): FundamentalFeed {
-  if (!macro && !news) throw new Error('宏观与财经资讯源暂不可用');
+  if (!macro && !news && !history) throw new Error('宏观与财经资讯源暂不可用');
   const official = macro?.value.items || [];
   const financeNews = news?.value || [];
-  const combined = [...official, ...financeNews]
-    .filter(
-      (item, index, all) =>
-        all.findIndex((x) => x.title === item.title) === index,
-    )
-    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+  const combined = uniqueNews([...official, ...financeNews]).sort((a, b) =>
+    b.publishedAt.localeCompare(a.publishedAt),
+  );
   const pmi = macro?.value.pmi;
   const marketView = pmi
     ? `${pmi.period}官方数据显示，制造业PMI为${pmi.manufacturing}、非制造业商务活动指数为${pmi.nonManufacturing}、综合PMI为${pmi.composite}。当前基本面应重点核验需求、价格、库存和现金流的行业分化。`
@@ -409,7 +463,7 @@ export function composeFundamentalFeed(
         : '景气分化'
     : '等待核验';
   return {
-    updatedAt: [macro?.fetchedAt, news?.fetchedAt]
+    updatedAt: [macro?.fetchedAt, news?.fetchedAt, history?.fetchedAt]
       .filter(Boolean)
       .sort((a, b) => a!.localeCompare(b!))
       .at(-1)!,
@@ -423,6 +477,20 @@ export function composeFundamentalFeed(
       sourceUrl: item.sourceUrl,
     })),
     news: combined,
+    // Historical news belongs to this UI, not the agent's bounded news input.
+    macroNews: uniqueNews([
+      ...combined.filter(
+        (item) => item.category === '宏观' || item.category === '政策',
+      ),
+      ...(history?.value.items || []),
+    ]).sort((a, b) => b.publishedAt.localeCompare(a.publishedAt)),
+    macroHistory: history
+      ? {
+          from: history.value.from,
+          complete: history.value.complete,
+          stale: history.stale,
+        }
+      : { from: '', complete: false, stale: true },
     stockReasons: [],
     sectorReasons: [],
     methodology:

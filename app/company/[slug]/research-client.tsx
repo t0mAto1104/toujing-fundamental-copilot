@@ -189,8 +189,20 @@ function FactorSection({ factor }: { factor: FactorGroup }) {
 export default function CompanyResearch() {
   const { user } = useWorkspaceSession();
   const [progress, setProgress] = useState('正在确认研究对象…');
+  const [researchTaskId, setResearchTaskId] = useState('');
   const researchController = useRef<AbortController | null>(null);
-  useEffect(() => () => researchController.current?.abort(), []);
+  const researchGeneration = useRef(0),
+    mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      // Invalidate the latest async request, not a DOM ref captured at mount.
+      // oxlint-disable-next-line react-hooks/exhaustive-deps
+      researchGeneration.current++;
+      researchController.current?.abort();
+    };
+  }, []);
   const [report, setReport] = useState<CompanyReport | null>(null);
   const [legacyReport, setLegacyReport] = useState<SavedReport | null>(null);
   const [error, setError] = useState('');
@@ -216,6 +228,7 @@ export default function CompanyResearch() {
     listingId?: string,
     listing?: ListingOption,
   ) => {
+    if (!mounted.current) return;
     setError('');
     setReport(null);
     setLegacyReport(null);
@@ -236,10 +249,18 @@ export default function CompanyResearch() {
           query: input,
           listingId,
           listing: listing || listings.find((item) => item.id === listingId),
-          model: getPreferredResearchModel(user?.allowedAIModels),
+          // A display-policy timeout must not silently switch the saved model.
+          // The API always verifies the current allowlist before any AI call.
+          model: getPreferredResearchModel(
+            user?.modelPolicyUnavailable ? undefined : user?.allowedAIModels,
+          ),
         }),
       });
-      const payload = await readResearchResponse(response, setProgress);
+      const payload = await readResearchResponse(
+        response,
+        setProgress,
+        setResearchTaskId,
+      );
       if (controller.signal.aborted) return;
       setReport(payload as CompanyReport);
       await saveReport(payload as CompanyReport, input);
@@ -254,9 +275,11 @@ export default function CompanyResearch() {
     input: string,
     preferredListingId?: string,
   ) => {
+    const generation = ++researchGeneration.current;
     setActiveQuery(input);
     setListingNotice('');
     const resolvedListings = await fetchListingOptions(input);
+    if (!mounted.current || generation !== researchGeneration.current) return;
     setListings(resolvedListings);
     const selected =
       resolvedListings.find((item) => item.id === preferredListingId) ||
@@ -275,7 +298,9 @@ export default function CompanyResearch() {
     const preferredListingId = params.get('listing') || undefined;
     const savedId = params.get('saved');
     const initialResearch = window.setTimeout(async () => {
-      const savedEntry = savedId ? await readStoredReport(savedId) : null;
+      const savedEntry = savedId
+        ? await readStoredReport(savedId).catch(() => null)
+        : null;
       if (savedEntry?.report) {
         setActiveQuery(savedEntry.query);
         setReport(savedEntry.report);
@@ -297,6 +322,12 @@ export default function CompanyResearch() {
         setLegacyReport(savedEntry);
         setSaved(true);
         setSelectedListingId(savedEntry.listingId || '');
+        return;
+      }
+      if (savedId) {
+        setError(
+          '此报告不存在或暂时无法读取。未启动新的 AI 研究，请回到我的报告重试打开。',
+        );
         return;
       }
       void resolveListingsAndLoad(analysisQuery, preferredListingId);
@@ -436,6 +467,45 @@ export default function CompanyResearch() {
         </div>
       </header>
 
+      {researchTaskId ? (
+        <p className="my-3 text-sm text-muted-foreground">
+          任务已登记。
+          <a className="text-primary underline" href="/reports">
+            查看任务与已保存分段
+          </a>
+          ；离页后不会自动续跑。
+        </p>
+      ) : null}
+      {report?.researchRun ? (
+        <details className="my-4 border border-border p-4 text-sm">
+          <summary className="cursor-pointer">报告版本与证据快照</summary>
+          <p className="mt-2">
+            模型 {report.researchRun.model} · 框架{' '}
+            {report.researchRun.frameworkVersion}
+          </p>
+          <p>
+            取证时点 {report.researchRun.evidenceAsOf} · 财报期间{' '}
+            {report.researchRun.financialPeriods.join('、')}
+          </p>
+          <button
+            className="mt-2 text-primary underline"
+            onClick={() => {
+              const url = URL.createObjectURL(
+                new Blob([JSON.stringify(report.researchRun, null, 2)], {
+                  type: 'application/json',
+                }),
+              );
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${report.companyName}-研究证据快照.json`;
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}
+          >
+            下载本版证据快照
+          </button>
+        </details>
+      ) : null}
       {!report && !legacyReport && !error && (
         <AnalysisSkeleton progress={progress} />
       )}

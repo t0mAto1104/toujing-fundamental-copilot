@@ -12,9 +12,13 @@ export async function GET() {
             email: user.email,
             isAdmin: isSiteAdminUser(user),
             allowedAIModels: modelPolicy?.allowedAIModels,
+            modelPolicyUnavailable: modelPolicy?.modelPolicyUnavailable,
           }
         : null,
     },
-    { headers: { 'Cache-Control': 'no-store' } },
+    {
+      status: modelPolicy?.modelPolicyUnavailable ? 503 : 200,
+      headers: { 'Cache-Control': 'no-store' },
+    },
   );
 }

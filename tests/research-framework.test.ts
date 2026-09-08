@@ -316,9 +316,11 @@ void test('framework has no reference-company numbers and uses bounded resumable
   assert.match(pipeline, /checkpointedResearchStage/);
   assert.match(pipeline, /Promise\.allSettled\(jobs\)/);
   assert.match(pipeline, /webSearch: false/);
+  const accessGuard = route.indexOf('await requireResearchAccess');
+  const bodyRead = route.indexOf('await request.text');
   assert.ok(
-    route.indexOf('await assertResearchAccess') <
-      route.indexOf('await request.json'),
+    accessGuard >= 0 && bodyRead > accessGuard,
+    'authentication precedes body processing',
   );
   assert.ok(!pipeline.includes('setInterval'));
   assert.ok(!route.includes('xiaomiFallbackReport'));

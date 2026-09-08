@@ -14,10 +14,13 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 
 import { Input } from '@/components/ui/input';
+import { ResearchOperations } from '@/components/research-operations';
 import { WorkspaceShell } from '@/components/workspace-shell';
 import { AI_MODELS, type AIModelId } from '@/lib/ai-models';
 
 type ManagedUser = {
+  reportTokenLimit: number;
+  reportUsdLimit: number;
   id: string;
   email: string;
   displayName: string;
@@ -40,6 +43,12 @@ type UsageEvent = {
   endpoint: string;
   model: string;
   inputTokens: number;
+  cachedInputTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  researchTaskId?: string | null;
+  serviceTier?: string | null;
+  estimatedCostUsd?: number | null;
+  pricingVersion?: string | null;
   outputTokens: number;
   reasoningTokens: number;
   totalTokens: number;
@@ -54,6 +63,8 @@ type UsageSummary = {
   requestsToday: number;
   tokensToday: number;
   webSearchesToday: number;
+  estimatedCostUsdToday?: number | null;
+  unpricedRequestsToday?: number;
 };
 
 function displayDate(value: string) {
@@ -94,7 +105,10 @@ export function AdminDashboard() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/admin/users', { cache: 'no-store' });
+      const response = await fetch('/api/admin/users', {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+      });
       const payload = (await response.json()) as {
         users?: ManagedUser[];
         usageEvents?: UsageEvent[];
@@ -125,7 +139,13 @@ export function AdminDashboard() {
       );
       setCurrentAdminId(payload.currentAdminId || '');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '用户列表加载失败。');
+      setError(
+        cause instanceof Error && cause.name === 'TimeoutError'
+          ? '用户列表加载超时，请稍后重试。'
+          : cause instanceof Error
+            ? cause.message
+            : '用户列表加载失败。',
+      );
     } finally {
       setLoading(false);
     }
@@ -467,6 +487,7 @@ export function AdminDashboard() {
           ) : null}
         </div>
 
+        <ResearchOperations users={users} onChanged={() => void loadUsers()} />
         <section className="mt-8 border-t border-border pt-6">
           <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-end">
             <div>
@@ -487,10 +508,14 @@ export function AdminDashboard() {
                   <th className="px-3 py-3 font-medium">接口</th>
                   <th className="px-3 py-3 font-medium">模型</th>
                   <th className="px-3 py-3 text-right font-medium">输入</th>
+                  <th className="px-3 py-3 text-right font-medium">
+                    缓存读 / 写
+                  </th>
                   <th className="px-3 py-3 text-right font-medium">输出</th>
                   <th className="px-3 py-3 text-right font-medium">推理</th>
                   <th className="px-3 py-3 text-right font-medium">总计</th>
                   <th className="px-3 py-3 text-right font-medium">联网</th>
+                  <th className="px-3 py-3 text-right font-medium">预估 USD</th>
                   <th className="px-3 py-3 text-right font-medium">状态</th>
                 </tr>
               </thead>
@@ -510,6 +535,14 @@ export function AdminDashboard() {
                     </td>
                     <td className="px-3 py-3 font-mono text-[10px]">
                       {event.endpoint}
+                      {event.researchTaskId ? (
+                        <p
+                          className="mt-1 text-muted-foreground"
+                          title={event.researchTaskId}
+                        >
+                          研究组 {event.researchTaskId.slice(0, 8)}
+                        </p>
+                      ) : null}
                     </td>
                     <td className="px-3 py-3 font-mono text-[10px] text-muted-foreground">
                       {event.model}
@@ -518,6 +551,15 @@ export function AdminDashboard() {
                       {event.usageKnown === false
                         ? '未知'
                         : formatNumber(event.inputTokens)}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 text-right font-mono">
+                      {event.cachedInputTokens == null
+                        ? '未知'
+                        : formatNumber(event.cachedInputTokens)}{' '}
+                      /{' '}
+                      {event.cacheWriteTokens == null
+                        ? '未知'
+                        : formatNumber(event.cacheWriteTokens)}
                     </td>
                     <td className="px-3 py-3 text-right font-mono">
                       {event.usageKnown === false
@@ -537,6 +579,18 @@ export function AdminDashboard() {
                     <td className="px-3 py-3 text-right font-mono">
                       {formatNumber(event.webSearchRequests)}
                     </td>
+                    <td
+                      className="px-3 py-3 text-right font-mono"
+                      title={
+                        event.pricingVersion
+                          ? `${event.pricingVersion} · ${event.serviceTier} · 非账单`
+                          : '缺少完整用量、缓存或已核实价目，不能准确估算'
+                      }
+                    >
+                      {event.estimatedCostUsd == null
+                        ? '未知'
+                        : `$${event.estimatedCostUsd.toFixed(4)}`}
+                    </td>
                     <td className="px-3 py-3 text-right">
                       <span
                         title={event.errorCode || undefined}
@@ -555,6 +609,15 @@ export function AdminDashboard() {
               </div>
             ) : null}
           </div>
+          <p className="mt-3 text-[10px] text-muted-foreground">
+            今日可估算请求合计{' '}
+            {usageSummary.estimatedCostUsdToday == null
+              ? '未知'
+              : `$${usageSummary.estimatedCostUsdToday.toFixed(4)}`}
+            ；另有 {usageSummary.unpricedRequestsToday || 0}{' '}
+            次缺少计价资料。缓存读写包含在输入中，推理包含在输出中，不重复相加。预估含已返回的联网次数，按请求时核实的标准价记录，以
+            OpenAI 账单为准。
+          </p>
           <p className="mt-3 text-[10px] text-muted-foreground">
             累计已生成 {formatNumber(totalResearch)}{' '}
             份研究报告。审计日志不保存用户的完整提问或报告正文。

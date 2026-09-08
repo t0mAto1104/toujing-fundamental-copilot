@@ -1,6 +1,7 @@
 import { getReportDatabase } from '@/lib/report-database';
 import { isAIModelId, parseAllowedAIModels } from '@/lib/ai-models';
 import { chinaDateKey, requireSiteAdmin } from '@/lib/site-users';
+import { within } from '@/lib/request-deadline';
 
 type UserRow = {
   id: string;
@@ -14,6 +15,8 @@ type UserRow = {
   daily_research_used: number;
   daily_research_date: string;
   allowed_ai_models: string;
+  report_token_limit: number;
+  report_usd_limit: number;
   ai_request_count: number;
   total_tokens: number;
 };
@@ -26,6 +29,12 @@ type UsageEventRow = {
   endpoint: string;
   model: string;
   input_tokens: number;
+  cached_input_tokens: number | null;
+  cache_write_tokens: number | null;
+  research_task_id: string | null;
+  service_tier: string | null;
+  estimated_cost_usd: number | null;
+  pricing_version: string | null;
   output_tokens: number;
   reasoning_tokens: number;
   total_tokens: number;
@@ -52,6 +61,8 @@ function serializeUser(row: UserRow, today: string) {
     aiRequestCount: Math.max(0, row.ai_request_count),
     totalTokens: Math.max(0, row.total_tokens),
     allowedAIModels: parseAllowedAIModels(row.allowed_ai_models),
+    reportTokenLimit: row.report_token_limit,
+    reportUsdLimit: row.report_usd_limit,
   };
 }
 
@@ -64,6 +75,12 @@ function serializeUsageEvent(row: UsageEventRow) {
     endpoint: row.endpoint,
     model: row.model,
     inputTokens: row.input_tokens,
+    cachedInputTokens: row.cached_input_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    researchTaskId: row.research_task_id,
+    serviceTier: row.service_tier,
+    estimatedCostUsd: row.estimated_cost_usd,
+    pricingVersion: row.pricing_version,
     outputTokens: row.output_tokens,
     reasoningTokens: row.reasoning_tokens,
     totalTokens: row.total_tokens,
@@ -91,6 +108,20 @@ function chinaDayStartUtc(dateKey: string) {
 }
 
 export async function GET() {
+  try {
+    return await within(loadUsers(), 6_000);
+  } catch (error) {
+    console.warn('admin_users_unavailable', {
+      reason: error instanceof Error ? error.name : 'Error',
+    });
+    return Response.json(
+      { error: '用户数据暂时无法加载，请稍后重试。' },
+      { status: 503, headers: { 'Cache-Control': 'private, no-store' } },
+    );
+  }
+}
+
+async function loadUsers() {
   const admin = await requireSiteAdmin();
   if (!admin) return Response.json({ error: '无权访问。' }, { status: 403 });
   const database = getReportDatabase();
@@ -105,7 +136,7 @@ export async function GET() {
         `SELECT u.id, u.email, u.display_name, u.first_seen_at,
           u.last_seen_at, u.research_count, u.research_enabled,
           u.daily_research_limit, u.daily_research_used,
-          u.daily_research_date, u.allowed_ai_models,
+          u.daily_research_date, u.allowed_ai_models, u.report_token_limit, u.report_usd_limit,
           COUNT(e.id) AS ai_request_count,
           COALESCE(SUM(e.total_tokens), 0) AS total_tokens
         FROM users u
@@ -120,7 +151,9 @@ export async function GET() {
       .prepare(
         `SELECT e.id, e.user_id, u.email, u.display_name, e.endpoint,
           e.model, e.input_tokens, e.output_tokens, e.reasoning_tokens,
-          e.total_tokens, e.web_search_requests, e.status, e.error_code, e.created_at
+          e.total_tokens, e.web_search_requests, e.status, e.error_code, e.created_at,
+          e.cached_input_tokens, e.cache_write_tokens, e.research_task_id,
+          e.service_tier, e.estimated_cost_usd, e.pricing_version
         FROM ai_usage_events e
         JOIN users u ON u.id = e.user_id
         ORDER BY e.created_at DESC LIMIT 100`,
@@ -129,11 +162,19 @@ export async function GET() {
     database
       .prepare(
         `SELECT COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens,
-          COALESCE(SUM(web_search_requests), 0) AS web_searches
+          COALESCE(SUM(web_search_requests), 0) AS web_searches,
+          SUM(estimated_cost_usd) AS estimated_cost_usd,
+          COUNT(*) - COUNT(estimated_cost_usd) AS unpriced_requests
         FROM ai_usage_events WHERE created_at >= ?`,
       )
       .bind(todayStart)
-      .first<{ requests: number; tokens: number; web_searches: number }>(),
+      .first<{
+        requests: number;
+        tokens: number;
+        web_searches: number;
+        estimated_cost_usd: number | null;
+        unpriced_requests: number;
+      }>(),
   ]);
   return Response.json(
     {
@@ -143,6 +184,8 @@ export async function GET() {
         requestsToday: todayUsage?.requests || 0,
         tokensToday: todayUsage?.tokens || 0,
         webSearchesToday: todayUsage?.web_searches || 0,
+        estimatedCostUsdToday: todayUsage?.estimated_cost_usd ?? null,
+        unpricedRequestsToday: todayUsage?.unpriced_requests || 0,
       },
       currentAdminId: admin.userId,
     },
@@ -153,18 +196,45 @@ export async function GET() {
 export async function PATCH(request: Request) {
   const admin = await requireSiteAdmin();
   if (!admin) return Response.json({ error: '无权访问。' }, { status: 403 });
+  if (
+    request.headers.get('origin') &&
+    request.headers.get('origin') !== new URL(request.url).origin
+  )
+    return Response.json({ error: '不允许跨站修改。' }, { status: 403 });
   const body = (await request.json()) as {
     userId?: string;
     researchEnabled?: boolean;
     dailyResearchLimit?: number;
     allowedAIModels?: unknown[];
+    reportTokenLimit?: number;
+    reportUsdLimit?: number;
   };
   if (!body.userId || body.userId.length > 200)
     return Response.json({ error: '缺少目标用户。' }, { status: 400 });
   const hasAccessChange = typeof body.researchEnabled === 'boolean';
   const hasLimitChange = Number.isInteger(body.dailyResearchLimit);
   const hasModelChange = Array.isArray(body.allowedAIModels);
-  if (!hasAccessChange && !hasLimitChange && !hasModelChange)
+  const hasBudgetChange =
+    body.reportTokenLimit !== undefined || body.reportUsdLimit !== undefined;
+  if (
+    hasBudgetChange &&
+    (!Number.isInteger(body.reportTokenLimit) ||
+      body.reportTokenLimit! < 1000 ||
+      body.reportTokenLimit! > 500000 ||
+      !Number.isFinite(body.reportUsdLimit) ||
+      body.reportUsdLimit! <= 0 ||
+      body.reportUsdLimit! > 100)
+  )
+    return Response.json(
+      { error: '单报告上限须为 1000～500000 Token、0～100 美元（不含零）。' },
+      { status: 400 },
+    );
+  if (
+    !hasAccessChange &&
+    !hasLimitChange &&
+    !hasModelChange &&
+    !hasBudgetChange
+  )
     return Response.json({ error: '没有可更新的限制条件。' }, { status: 400 });
   if (
     hasLimitChange &&
@@ -197,7 +267,7 @@ export async function PATCH(request: Request) {
 
   const current = await database
     .prepare(
-      `SELECT research_enabled, daily_research_limit, allowed_ai_models
+      `SELECT research_enabled, daily_research_limit, allowed_ai_models, report_token_limit, report_usd_limit
        FROM users WHERE id = ? LIMIT 1`,
     )
     .bind(body.userId)
@@ -205,13 +275,15 @@ export async function PATCH(request: Request) {
       research_enabled: number;
       daily_research_limit: number;
       allowed_ai_models: string;
+      report_token_limit: number;
+      report_usd_limit: number;
     }>();
   if (!current)
     return Response.json({ error: '未找到目标用户。' }, { status: 404 });
   const result = await database
     .prepare(
       `UPDATE users SET research_enabled = ?, daily_research_limit = ?,
-        allowed_ai_models = ? WHERE id = ?`,
+        allowed_ai_models = ?, report_token_limit = ?, report_usd_limit = ? WHERE id = ?`,
     )
     .bind(
       hasAccessChange
@@ -223,6 +295,8 @@ export async function PATCH(request: Request) {
       hasModelChange
         ? JSON.stringify(allowedAIModels)
         : current.allowed_ai_models,
+      hasBudgetChange ? body.reportTokenLimit : current.report_token_limit,
+      hasBudgetChange ? body.reportUsdLimit : current.report_usd_limit,
       body.userId,
     )
     .run();

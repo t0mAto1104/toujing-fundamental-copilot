@@ -127,6 +127,15 @@ export type DeepResearch = {
 };
 
 export type CompanyReport = {
+  researchRun?: {
+    taskId: string;
+    model: string;
+    frameworkVersion: string;
+    pipelineVersion: string;
+    evidenceAsOf: string;
+    financialPeriods: string[];
+    evidence: unknown;
+  };
   companyName: string;
   companyCode: string;
   exchange: string;

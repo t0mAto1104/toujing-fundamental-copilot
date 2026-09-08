@@ -100,6 +100,12 @@ export default function ResearchAssistantPage() {
         ) : null}
 
         <section className="saas-panel mt-8 border-primary/15">
+          <a
+            className="block border-b border-border p-4 text-sm text-primary"
+            href="/reports"
+          >
+            任务中心 · 批量研究 · 预算设置 · 历史版本对比 →
+          </a>
           <div className="border-b border-border bg-primary/[0.045] p-6 sm:p-8">
             <div className="flex items-center gap-2 text-xs font-semibold text-primary">
               <Sparkles className="size-4" />
