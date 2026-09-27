@@ -256,7 +256,7 @@ void test('API rejects invalid symbols, unsupported coverage and unbounded range
   try {
     for (const query of [
       'kind=foo',
-      'kind=questions&symbol=sh600519',
+      'kind=questions&symbol=bj920001',
       'kind=concepts&symbol=sh510300',
       'kind=concepts&symbol=https://bad',
       'kind=questions&symbol=sz002594&days=365',

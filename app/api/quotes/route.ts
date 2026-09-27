@@ -1,4 +1,5 @@
 import { getMarketQuotes } from '@/lib/a-stock-quotes';
+import { A_STOCK_DATA } from '@/lib/a-stock-version';
 import { MARKET_INDICES, normalizeQuoteSymbol } from '@/lib/quote-types';
 
 export async function GET(request: Request) {
@@ -19,9 +20,15 @@ export async function GET(request: Request) {
     );
   }
   try {
-    return Response.json(await getMarketQuotes(symbols, request.signal), {
-      headers: { 'Cache-Control': 'no-store' },
-    });
+    return Response.json(
+      {
+        ...(await getMarketQuotes(symbols, request.signal)),
+        dataSkill: A_STOCK_DATA,
+      },
+      {
+        headers: { 'Cache-Control': 'no-store' },
+      },
+    );
   } catch {
     return Response.json(
       { error: '行情数据源暂不可达，请稍后刷新。' },

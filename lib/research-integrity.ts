@@ -213,7 +213,7 @@ export function enforceReportIntegrity(
     if (!evidence.length)
       return {
         ...factor,
-        signal: '中性',
+        signal: '待核验',
         title: `${factor.category}资料待补充`,
         summary: '本轮未取得足以支持公司特定判断的证据，不代表不存在相关影响。',
         evidence,
@@ -235,7 +235,7 @@ export function enforceReportIntegrity(
         (url) => !sourceMap.has(canonicalSourceUrl(url) || ''),
       );
       if (!chapter || !sourceUrls.length || hasUnknownSource) {
-        if (chapter?.sourceUrls.length) blocked = true;
+        blocked = true;
         gaps.add(`${topic}：资料不足，未补造公司事实。`);
         return missingChapter(topic);
       }
@@ -395,6 +395,7 @@ export function enforceReportIntegrity(
     report.notice =
       '部分条目未通过来源检查，已逐项移除；结论仅依据保留的证据，不代表资料已完整。';
   } else if (context.quote?.isStale) report.notice = context.quote.staleReason;
+  if (blocked || !cited.size) report.degraded = true;
   // Keep every referenced source; a fixed slice could otherwise orphan citations.
   report.sources = [...cited].map((url) => sourceMap.get(url)!);
   report.disclaimer =

@@ -1,0 +1,193 @@
+.notebook-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  color: var(--foreground);
+}
+.notebook-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.notebook-toolbar button,
+.notebook-toolbar select {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.notebook-toolbar select {
+  width: 56px;
+  padding: 0 7px;
+  font-size: 13px;
+}
+.notebook-toolbar select option {
+  background: var(--popover);
+  color: var(--foreground);
+}
+.notebook-toolbar button:hover,
+.notebook-toolbar button[aria-pressed='true'],
+.notebook-toolbar button[aria-expanded='true'] {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.notebook-toolbar :is(button, select):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.notebook-toolbar :disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.notebook-toolbar svg {
+  width: 16px;
+  height: 16px;
+}
+.notebook-toolbar-divider {
+  height: 16px;
+  width: 1px;
+  background: var(--border);
+  margin: 0 3px;
+}
+.notebook-palette-anchor {
+  position: relative;
+}
+.notebook-palette {
+  display: grid;
+  grid-template-columns: repeat(4, 36px);
+  gap: 4px;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 2;
+  margin: 0;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  box-shadow: 0 8px 24px #0002;
+}
+.notebook-swatch::before {
+  content: '';
+  grid-area: 1 / 1;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid #80808080;
+  background: var(--swatch-color);
+}
+.notebook-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 15px 18px 28px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  outline: none;
+  font-size: 16px;
+  line-height: 1.75;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.notebook-canvas:focus-visible {
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--primary) 45%, transparent);
+}
+.notebook-canvas[aria-disabled='true'] {
+  opacity: 0.6;
+}
+.notebook-canvas font[size='1'] {
+  font-size: 12px;
+}
+.notebook-canvas font[size='2'] {
+  font-size: 14px;
+}
+.notebook-canvas font[size='3'] {
+  font-size: 16px;
+}
+.notebook-canvas font[size='4'] {
+  font-size: 18px;
+}
+.notebook-canvas font[size='5'] {
+  font-size: 20px;
+}
+.notebook-canvas font[size='6'] {
+  font-size: 24px;
+}
+.notebook-canvas font[size='7'] {
+  font-size: 32px;
+}
+.notebook-canvas font[color='rgba(0, 0, 0, 0)'] {
+  color: var(--notebook-text, var(--foreground));
+  --notebook-highlight-ink: #111827;
+}
+.notebook-canvas font[color='#111827'] {
+  --notebook-highlight-ink: #111827;
+}
+.notebook-canvas font[color='#ffffff'] {
+  --notebook-highlight-ink: #ffffff;
+}
+.notebook-canvas font[color='#ef4444'] {
+  --notebook-highlight-ink: #ef4444;
+}
+.notebook-canvas font[color='#f59e0b'] {
+  --notebook-highlight-ink: #f59e0b;
+}
+.notebook-canvas font[color='#22c55e'] {
+  --notebook-highlight-ink: #22c55e;
+}
+.notebook-canvas font[color='#3b82f6'] {
+  --notebook-highlight-ink: #3b82f6;
+}
+.notebook-canvas font[color='#a855f7'] {
+  --notebook-highlight-ink: #a855f7;
+}
+.notebook-canvas
+  :is(
+    [style*='background-color: rgb(254, 240, 138)'],
+    [style*='background-color: rgb(187, 247, 208)'],
+    [style*='background-color: rgb(191, 219, 254)'],
+    [style*='background-color: rgb(251, 207, 232)']
+  ) {
+  --notebook-text: var(--notebook-highlight-ink, #111827);
+  color: var(--notebook-text);
+}
+.notebook-editor-error {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--destructive);
+  border-top: 1px solid var(--border);
+}
+@media (pointer: coarse) {
+  .notebook-toolbar button,
+  .notebook-toolbar select {
+    min-width: 44px;
+    height: 44px;
+  }
+  .notebook-palette {
+    grid-template-columns: repeat(4, 44px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notebook-toolbar button,
+  .notebook-toolbar select {
+    transition: none;
+  }
+}

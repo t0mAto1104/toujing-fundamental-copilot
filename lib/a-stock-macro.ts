@@ -5,6 +5,7 @@ import {
   stripHtml,
 } from '@/lib/a-stock-http';
 import { deduplicateNews, eventTransmission } from '@/lib/news-evidence';
+import { wallstreetNews, cctvEconomyNews } from '@/lib/a-stock-news-extra';
 import type { MacroPolicyHistory } from '@/lib/macro-policy-history';
 import {
   type DataSnapshot,
@@ -402,20 +403,28 @@ async function fetchEastmoneyFinanceNews() {
 }
 
 async function refreshFinanceNews() {
-  const [eastmoneyResult, sinaResult] = await Promise.allSettled([
+  const results = await Promise.allSettled([
     fetchEastmoneyFinanceNews(),
     fetchSinaFinanceNews(),
+    wallstreetNews(),
+    cctvEconomyNews(),
   ]);
-  const merged = [
-    ...(eastmoneyResult.status === 'fulfilled' ? eastmoneyResult.value : []),
-    ...(sinaResult.status === 'fulfilled' ? sinaResult.value : []),
-  ];
+  const merged = results
+    .flatMap((result) => (result.status === 'fulfilled' ? result.value : []))
+    .map((item) => {
+      const category = classifyNews(`${item.title} ${item.summary}`);
+      return {
+        ...item,
+        category,
+        implication: implicationFor(category, `${item.title} ${item.summary}`),
+      };
+    });
   const verified = uniqueNews(merged);
   if (!verified.length)
     throw new Error('财经资讯主源与备用源均未返回有效日期的内容');
   return verified
     .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
-    .slice(0, 30);
+    .slice(0, 100);
 }
 
 export async function getOfficialMacroSnapshot() {

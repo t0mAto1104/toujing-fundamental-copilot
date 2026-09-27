@@ -9,22 +9,10 @@ import {
   LoaderCircle,
   Send,
 } from 'lucide-react';
-import type {
-  Dispatch,
-  PointerEvent as ReactPointerEvent,
-  SetStateAction,
-} from 'react';
-import { useEffect, useRef, useState } from 'react';
-
-import { getPreferredAIModel } from '@/lib/ai-models';
-
-type Source = { title: string; url: string };
-type Message = {
-  role: 'agent' | 'user';
-  text: string;
-  keyPoints?: string[];
-  sources?: Source[];
-};
+import type { PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useWorkspaceSession } from '@/components/workspace-session';
+import { EMPTY_CHAT, getMarketChatStore } from '@/lib/market-agent-chat-store';
 type Position = { x: number; y: number };
 type DockSide = 'left' | 'right' | 'top' | 'bottom' | null;
 
@@ -34,13 +22,25 @@ const OPEN_KEY = 'lens-agent-open';
 const PANEL_WIDTH = 390;
 const VIEWPORT_MARGIN = 12;
 const EDGE_DISTANCE = 30;
-
-function appendAgentMessage(
-  setter: Dispatch<SetStateAction<Message[]>>,
-  text: string,
-) {
-  setter((current) => [...current, { role: 'agent', text }]);
-}
+const preferences = {
+  getItem(key: string) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  setItem(key: string, value: string) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {}
+  },
+  removeItem(key: string) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {}
+  },
+};
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
@@ -61,7 +61,7 @@ function defaultPosition(): Position {
 function readPosition(): Position {
   try {
     const parsed = JSON.parse(
-      window.localStorage.getItem(POSITION_KEY) || '',
+      preferences.getItem(POSITION_KEY) || '',
     ) as Position;
     if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) return parsed;
   } catch {}
@@ -73,9 +73,25 @@ const suggestions = [
   '近期宏观政策影响哪些行业？',
 ];
 
-export function MarketAgentChat({ context }: { context: string }) {
-  const [question, setQuestion] = useState('');
-  const [loading, setLoading] = useState(false);
+export function MarketAgentChat() {
+  const { user } = useWorkspaceSession();
+  // SSR never creates an account store. On the client selecting the store is
+  // synchronous, so switching accounts cannot render the previous user's state.
+  const store =
+    typeof window === 'undefined' ? null : getMarketChatStore(user?.id || null);
+  const {
+    messages,
+    draft: question,
+    loading,
+    storageWarning,
+  } = useSyncExternalStore(
+    store?.subscribe || (() => () => {}),
+    store?.getSnapshot || (() => EMPTY_CHAT),
+    () => EMPTY_CHAT,
+  );
+  const [visibleCount, setVisibleCount] = useState(20);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followLatest = useRef(true);
   const [open, setOpen] = useState(true);
   const [hydrated, setHydrated] = useState(false);
   const [position, setPosition] = useState<Position>({
@@ -85,7 +101,6 @@ export function MarketAgentChat({ context }: { context: string }) {
   const [dockSide, setDockSide] = useState<DockSide>(null);
   const panelRef = useRef<HTMLElement | null>(null);
   const positionRef = useRef(position);
-  const requestController = useRef<AbortController | null>(null);
   const dragState = useRef<{
     pointerId: number;
     startX: number;
@@ -94,12 +109,10 @@ export function MarketAgentChat({ context }: { context: string }) {
     moved: boolean;
   } | null>(null);
   const suppressClick = useRef(false);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: 'agent',
-      text: '我会基于政策、行业、资金、财报和宏观数据回答，并提供来源。',
-    },
-  ]);
+  useEffect(() => {
+    if (followLatest.current && scrollRef.current)
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, loading, open, dockSide]);
 
   const updatePosition = (next: Position) => {
     positionRef.current = next;
@@ -128,9 +141,44 @@ export function MarketAgentChat({ context }: { context: string }) {
   };
 
   useEffect(() => {
+    // Mobile keyboards resize the visual viewport, not always window.innerHeight.
+    const viewport = window.visualViewport;
+    const syncKeyboardViewport = () => {
+      const height = viewport?.height || window.innerHeight;
+      const inset = Math.max(
+        0,
+        window.innerHeight - height - (viewport?.offsetTop || 0),
+      );
+      document.documentElement.style.setProperty(
+        '--agent-visible-height',
+        `${height}px`,
+      );
+      document.documentElement.style.setProperty(
+        '--agent-keyboard-inset',
+        `${inset}px`,
+      );
+      window.requestAnimationFrame(() => {
+        if (followLatest.current && scrollRef.current)
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      });
+    };
+    syncKeyboardViewport();
+    viewport?.addEventListener('resize', syncKeyboardViewport);
+    viewport?.addEventListener('scroll', syncKeyboardViewport);
+    window.addEventListener('resize', syncKeyboardViewport);
+    return () => {
+      viewport?.removeEventListener('resize', syncKeyboardViewport);
+      viewport?.removeEventListener('scroll', syncKeyboardViewport);
+      window.removeEventListener('resize', syncKeyboardViewport);
+      document.documentElement.style.removeProperty('--agent-visible-height');
+      document.documentElement.style.removeProperty('--agent-keyboard-inset');
+    };
+  }, []);
+
+  useEffect(() => {
     const hydrateAgent = window.setTimeout(() => {
-      const storedOpen = window.localStorage.getItem(OPEN_KEY) !== 'false';
-      const storedDock = window.localStorage.getItem(DOCK_KEY) as DockSide;
+      const storedOpen = preferences.getItem(OPEN_KEY) !== 'false';
+      const storedDock = preferences.getItem(DOCK_KEY) as DockSide;
       setOpen(storedOpen);
       setDockSide(
         ['left', 'right', 'top', 'bottom'].includes(storedDock || '')
@@ -144,16 +192,15 @@ export function MarketAgentChat({ context }: { context: string }) {
     const onResize = () => {
       const next = clampToViewport(
         positionRef.current,
-        Boolean(window.localStorage.getItem(DOCK_KEY)),
+        Boolean(preferences.getItem(DOCK_KEY)),
       );
       updatePosition(next);
-      window.localStorage.setItem(POSITION_KEY, JSON.stringify(next));
+      preferences.setItem(POSITION_KEY, JSON.stringify(next));
     };
     window.addEventListener('resize', onResize);
     return () => {
       window.clearTimeout(hydrateAgent);
       window.removeEventListener('resize', onResize);
-      requestController.current?.abort();
     };
   }, []);
 
@@ -162,7 +209,7 @@ export function MarketAgentChat({ context }: { context: string }) {
     const frame = window.requestAnimationFrame(() => {
       const next = clampToViewport(positionRef.current, false);
       updatePosition(next);
-      window.localStorage.setItem(POSITION_KEY, JSON.stringify(next));
+      preferences.setItem(POSITION_KEY, JSON.stringify(next));
     });
     return () => window.cancelAnimationFrame(frame);
   }, [open, hydrated, dockSide]);
@@ -170,13 +217,20 @@ export function MarketAgentChat({ context }: { context: string }) {
   const toggleOpen = () => {
     setOpen((current) => {
       const next = !current;
-      window.localStorage.setItem(OPEN_KEY, String(next));
+      preferences.setItem(OPEN_KEY, String(next));
       document.documentElement.classList.toggle('agent-collapsed', !next);
       return next;
     });
   };
 
   const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    // On phones the panel stays within thumb reach; desktop dragging is unchanged.
+    if (
+      window.matchMedia(
+        '(max-width: 639px), (max-width: 1023px) and (pointer: coarse)',
+      ).matches
+    )
+      return;
     if (event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragState.current = {
@@ -238,21 +292,18 @@ export function MarketAgentChat({ context }: { context: string }) {
               : clamp(current.y, 6, window.innerHeight - 54),
       };
       setDockSide(nextSide);
-      window.localStorage.setItem(DOCK_KEY, nextSide);
+      preferences.setItem(DOCK_KEY, nextSide);
       updatePosition(compactPosition);
-      window.localStorage.setItem(
-        POSITION_KEY,
-        JSON.stringify(compactPosition),
-      );
+      preferences.setItem(POSITION_KEY, JSON.stringify(compactPosition));
       return;
     }
     if (dockSide) {
       setDockSide(null);
-      window.localStorage.removeItem(DOCK_KEY);
+      preferences.removeItem(DOCK_KEY);
     }
     const next = clampToViewport(current, false);
     updatePosition(next);
-    window.localStorage.setItem(POSITION_KEY, JSON.stringify(next));
+    preferences.setItem(POSITION_KEY, JSON.stringify(next));
   };
 
   const expandFromEdge = () => {
@@ -263,8 +314,8 @@ export function MarketAgentChat({ context }: { context: string }) {
     const previousSide = dockSide;
     setDockSide(null);
     setOpen(true);
-    window.localStorage.removeItem(DOCK_KEY);
-    window.localStorage.setItem(OPEN_KEY, 'true');
+    preferences.removeItem(DOCK_KEY);
+    preferences.setItem(OPEN_KEY, 'true');
     document.documentElement.classList.remove('agent-collapsed');
     const width = Math.min(
       PANEL_WIDTH,
@@ -293,7 +344,7 @@ export function MarketAgentChat({ context }: { context: string }) {
               ),
     };
     updatePosition(next);
-    window.localStorage.setItem(POSITION_KEY, JSON.stringify(next));
+    preferences.setItem(POSITION_KEY, JSON.stringify(next));
   };
 
   const ask = async (
@@ -302,61 +353,16 @@ export function MarketAgentChat({ context }: { context: string }) {
   ) => {
     event?.preventDefault();
     const text = (suggestedQuestion || question).trim();
-    if (!text || loading || requestController.current) return;
-    setQuestion('');
-    setLoading(true);
-    setMessages((current) => [...current, { role: 'user', text }]);
-    const controller = new AbortController();
-    requestController.current = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 50_000);
-    try {
-      const pageContext = `${context}；页面标题：${document.title}；页面路径：${window.location.pathname}；页面主题：${document.querySelector('h1')?.textContent || '未识别'}`;
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: text,
-          context: pageContext,
-          model: getPreferredAIModel(),
-        }),
-      });
-      const payload = (await response.json()) as {
-        answer?: string;
-        keyPoints?: string[];
-        sources?: Source[];
-        error?: string;
-      };
-      if (!response.ok || !payload.answer)
-        throw new Error(payload.error || '研究暂时没有完成。');
-      setMessages((current) => [
-        ...current,
-        {
-          role: 'agent',
-          text: payload.answer!,
-          keyPoints: payload.keyPoints,
-          sources: payload.sources,
-        },
-      ]);
-    } catch (error) {
-      const failureText = controller.signal.aborted
-        ? '检索超过50秒，已自动停止。请重试或缩小问题范围。'
-        : error instanceof Error
-          ? error.message
-          : 'Agent 暂时不可用，请稍后重试。';
-      appendAgentMessage(setMessages, failureText);
-    } finally {
-      window.clearTimeout(timeout);
-      requestController.current = null;
-      setLoading(false);
-    }
+    if (!text || loading) return;
+    followLatest.current = true;
+    await store?.ask(text);
   };
 
   if (dockSide) {
     return (
       <aside
         ref={panelRef}
-        className="print-hidden fixed z-50"
+        className="market-agent-docked print-hidden fixed z-50"
         style={{
           left: position.x,
           top: position.y,
@@ -383,7 +389,8 @@ export function MarketAgentChat({ context }: { context: string }) {
   return (
     <aside
       ref={panelRef}
-      className="print-hidden fixed z-50 w-[calc(100vw-1.5rem)] max-w-[390px] overflow-hidden rounded-2xl border border-primary/20 bg-card/96 shadow-2xl backdrop-blur-xl"
+      className="market-agent-panel print-hidden fixed z-50 w-[calc(100vw-1.5rem)] max-w-[390px] overflow-hidden rounded-2xl border border-primary/20 bg-card/96 shadow-2xl backdrop-blur-xl"
+      data-open={open}
       style={{
         left: position.x,
         top: position.y,
@@ -424,13 +431,62 @@ export function MarketAgentChat({ context }: { context: string }) {
 
       {open ? (
         <div data-agent-body>
+          <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-1.5 text-[10px] text-muted-foreground">
+            <span>
+              {user
+                ? '历史保存在此浏览器 · 按账户区分'
+                : '登录后可提问并保存历史'}
+            </span>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => {
+                if (window.confirm('清空此账户在本浏览器的聊天记录？'))
+                  store?.clear();
+              }}
+              className="min-h-8 px-2 hover:text-primary disabled:opacity-40"
+            >
+              清空
+            </button>
+          </div>
+          {storageWarning ? (
+            <p role="status" className="px-3 py-1 text-[10px] text-amber-500">
+              {storageWarning}
+            </p>
+          ) : null}
           <div
+            ref={scrollRef}
+            data-agent-history
             className="max-h-[220px] min-h-[112px] space-y-3 overflow-y-auto p-3 [scrollbar-width:thin]"
-            aria-live="polite"
+            aria-label="聊天记录"
+            tabIndex={0}
+            onScroll={(event) => {
+              const el = event.currentTarget;
+              followLatest.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 32;
+            }}
           >
-            {messages.slice(-5).map((message, index) => (
+            {messages.length > visibleCount ? (
+              <button
+                type="button"
+                className="min-h-9 w-full text-[11px] text-primary hover:underline"
+                onClick={() => {
+                  const el = scrollRef.current;
+                  const oldHeight = el?.scrollHeight || 0;
+                  const oldTop = el?.scrollTop || 0;
+                  followLatest.current = false;
+                  setVisibleCount((current) => current + 20);
+                  requestAnimationFrame(() => {
+                    if (el) el.scrollTop = oldTop + el.scrollHeight - oldHeight;
+                  });
+                }}
+              >
+                查看更早记录（{messages.length - visibleCount} 条）
+              </button>
+            ) : null}
+            {messages.slice(-visibleCount).map((message) => (
               <div
-                key={`${message.role}-${index}`}
+                key={message.id}
                 className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <div
@@ -462,13 +518,25 @@ export function MarketAgentChat({ context }: { context: string }) {
                       ))}
                     </div>
                   ) : null}
+                  {message.researchSuggested ? (
+                    <a
+                      href="/report-builder"
+                      className="mt-2 inline-flex min-h-9 items-center gap-1 text-xs text-primary hover:underline"
+                    >
+                      打开 AI自定义研报
+                      <ArrowUpRight className="size-3" />
+                    </a>
+                  ) : null}
                 </div>
               </div>
             ))}
             {loading ? (
-              <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+              <div
+                role="status"
+                className="flex items-center gap-2 text-[10px] text-muted-foreground"
+              >
                 <LoaderCircle className="size-3 animate-spin" />
-                正在检索并核验来源…
+                正在处理；需要联网的问题会检索并核验来源…
               </div>
             ) : null}
           </div>
@@ -493,7 +561,8 @@ export function MarketAgentChat({ context }: { context: string }) {
               <input
                 id="market-agent-question"
                 value={question}
-                onChange={(event) => setQuestion(event.target.value)}
+                maxLength={800}
+                onChange={(event) => store?.setDraft(event.target.value)}
                 placeholder="向 Agent 提问…"
                 className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-xs outline-none focus:ring-2 focus:ring-ring/40"
               />

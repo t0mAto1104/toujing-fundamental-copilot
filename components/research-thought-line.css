@@ -1,0 +1,140 @@
+/* Adapted from React Bits Thought Line. See docs/third-party/react-bits-thought-line.md. */
+.research-thought-line {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+.research-thought-line summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-height: 44px;
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 4px;
+}
+.research-thought-line summary::-webkit-details-marker {
+  display: none;
+}
+.research-thought-line summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+.research-thought-glyph {
+  width: 1.2em;
+  height: 1.2em;
+  flex-shrink: 0;
+  color: var(--primary);
+  animation: research-thought-breathe 1.6s cubic-bezier(0.77, 0, 0.175, 1)
+    infinite;
+}
+.research-thought-label {
+  font-weight: 600;
+  color: var(--foreground);
+}
+@supports (background-clip: text) {
+  .research-thought-label {
+    background: linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--foreground) 65%, var(--background)) 30%,
+      var(--foreground) 50%,
+      color-mix(in srgb, var(--foreground) 65%, var(--background)) 70%
+    );
+    background-size: 250% 100%;
+    background-position: 125% 0;
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    animation: research-thought-shimmer 1.8s linear infinite;
+  }
+}
+.research-thought-timer {
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.research-thought-chevron {
+  width: 1em;
+  height: 1em;
+  color: var(--muted-foreground);
+  transition: transform 200ms ease;
+}
+.research-thought-line details[open] .research-thought-chevron {
+  transform: rotate(180deg);
+}
+.research-thought-line ol {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.35rem 0 0.35rem 1.7rem;
+  list-style: none;
+  font-size: 0.875rem;
+}
+.research-thought-line li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  animation: research-thought-enter 220ms ease-out;
+}
+.research-thought-line li[data-current='true'] {
+  color: var(--foreground);
+}
+.research-thought-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 1em;
+  width: 1em;
+  height: 1em;
+}
+.research-thought-mark svg {
+  width: 1em;
+  height: 1em;
+}
+.research-thought-mark > span {
+  width: 0.4em;
+  height: 0.4em;
+  background: var(--primary);
+  border-radius: 50%;
+}
+@keyframes research-thought-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes research-thought-shimmer {
+  to {
+    background-position: -125% 0;
+  }
+}
+@keyframes research-thought-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .research-thought-line * {
+    animation: none !important;
+    transition: none !important;
+  }
+  .research-thought-label {
+    background: none;
+    color: var(--foreground);
+  }
+}

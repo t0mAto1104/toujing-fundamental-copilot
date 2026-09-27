@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTradingSession } from '@/components/trading-session';
 import { marketPollInterval } from '@/lib/official-data-types';
 
@@ -11,6 +11,7 @@ export function useMarketFeed<T>(
   timeoutMs = 13_000,
   enabled = true,
   marketAware = false,
+  manualRefreshUrl?: string,
 ) {
   const session = useTradingSession();
   const effectiveInterval = marketAware
@@ -22,7 +23,11 @@ export function useMarketFeed<T>(
   );
   const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
-  const refresh = useCallback(() => setRevision((n) => n + 1), []);
+  const manual = useRef(false);
+  const refresh = useCallback(() => {
+    manual.current = true;
+    setRevision((n) => n + 1);
+  }, []);
   useEffect(() => {
     if (!url || !enabled) return;
     let disposed = false;
@@ -38,7 +43,10 @@ export function useMarketFeed<T>(
       setLoading(true);
       let failed = false;
       try {
-        const response = await fetch(url, {
+        const requestUrl =
+          manual.current && manualRefreshUrl ? manualRefreshUrl : url;
+        manual.current = false;
+        const response = await fetch(requestUrl, {
           signal: controller.signal,
           cache: 'no-store',
         });
@@ -84,7 +92,7 @@ export function useMarketFeed<T>(
       controller?.abort();
       document.removeEventListener('visibilitychange', visibility);
     };
-  }, [url, effectiveInterval, revision, timeoutMs, enabled]);
+  }, [url, effectiveInterval, revision, timeoutMs, enabled, manualRefreshUrl]);
   return {
     data: result?.url === url ? result.value : null,
     error: error?.url === url ? error.message : '',

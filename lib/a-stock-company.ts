@@ -11,6 +11,10 @@ import {
 } from '@/lib/data-snapshot-cache';
 import type { ListingOption } from '@/lib/market-listings';
 import { requestDeadline } from '@/lib/request-deadline';
+import {
+  financialFieldName,
+  sinaFinancialField,
+} from '@/lib/research-financial-fields';
 
 type SourceRecord = {
   title: string;
@@ -71,6 +75,7 @@ export type CompanyFundamentalPacket = {
 
 type SinaReportItem = {
   item_title?: string;
+  item_field?: string;
   item_value?: string | number | null;
   item_tongbi?: string | number | null;
 };
@@ -180,11 +185,27 @@ async function fetchCompanyInfo(listing: ListingOption, signal?: AbortSignal) {
   };
 }
 
-function findFinancialItem(items: SinaReportItem[], labels: string[]) {
+export function findFinancialItem(
+  items: SinaReportItem[],
+  labels: string[],
+  statement = 'lrb',
+) {
   for (const label of labels) {
-    const exact = items.find((item) => item.item_title === label);
-    if (exact && exact.item_value !== null && exact.item_value !== '')
-      return exact;
+    const matches = items.filter(
+      (item) =>
+        sinaFinancialField(
+          statement,
+          item.item_title || '',
+          item.item_field,
+        ) === financialFieldName(label) &&
+        item.item_value != null &&
+        item.item_value !== '' &&
+        Number.isFinite(Number(item.item_value)),
+    );
+    // Accounting synonyms must agree. Never choose an arbitrary conflicting value.
+    if (new Set(matches.map((item) => Number(item.item_value))).size > 1)
+      return null;
+    if (matches.length) return matches[0];
   }
   return null;
 }
@@ -202,10 +223,7 @@ async function fetchSinaFinancialMetrics(
       source: 'lrb',
       metrics: [
         ['营业收入', ['营业收入', '营业总收入']],
-        [
-          '归母净利润',
-          ['归属于母公司所有者的净利润', '归属于母公司股东的净利润', '净利润'],
-        ],
+        ['归母净利润', ['归属于母公司所有者的净利润']],
       ],
     },
     {
@@ -241,7 +259,7 @@ async function fetchSinaFinancialMetrics(
       const period = Object.keys(reports).sort().reverse()[0];
       const items = period ? reports[period]?.data || [] : [];
       return definition.metrics.flatMap(([label, labels]) => {
-        const item = findFinancialItem(items, [...labels]);
+        const item = findFinancialItem(items, [...labels], definition.source);
         return item
           ? [
               {
@@ -341,7 +359,7 @@ async function fetchAnnouncements(
   }));
 }
 
-async function fetchResearchReports(
+async function fetchEastmoneyResearchReports(
   listing: ListingOption,
   signal?: AbortSignal,
 ) {
@@ -393,6 +411,35 @@ async function fetchResearchReports(
         : `https://data.eastmoney.com/report/${identity.code}.html`,
     };
   });
+}
+
+async function fetchResearchReports(
+  listing: ListingOption,
+  signal?: AbortSignal,
+) {
+  try {
+    const reports = await fetchEastmoneyResearchReports(listing, signal);
+    if (reports.length) return reports;
+  } catch {
+    signal?.throwIfAborted();
+  }
+  const identity = listingAStockIdentity(listing);
+  if (!identity || isLegacyBeijingCode(identity.code)) return [];
+  const { getSinaReports } = await import('@/lib/a-stock-sina-reports');
+  const snapshot = await getSinaReports(
+    `${identity.market.toLowerCase()}${identity.code}`,
+    1,
+    signal,
+  );
+  if (snapshot.stale) throw new Error('新浪研报缓存已过期');
+  return snapshot.data.slice(0, 6).map((r) => ({
+    title: r.title,
+    publisher: r.organization,
+    date: r.publishedAt,
+    rating: '来源未提供',
+    epsForecast: '来源未提供',
+    url: r.detailUrl,
+  }));
 }
 
 async function fetchFundFlow(listing: ListingOption, signal?: AbortSignal) {
@@ -547,7 +594,7 @@ export async function getCompanyFundamentalPacket(listing: ListingOption) {
 }
 
 export function companyFundamentalPacketCacheKey(listing: ListingOption) {
-  return `company:v3:${listing.id}`;
+  return `company:v4:${listing.id}`;
 }
 
 export async function readCachedCompanyFundamentalPacket(

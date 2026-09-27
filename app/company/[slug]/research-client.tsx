@@ -27,7 +27,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { BrandMark } from '@/components/brand-mark';
-import { readResearchResponse } from '@/lib/research-stream';
+import { MobileWorkspaceNav } from '@/components/mobile-workspace-nav';
+import { requestResearchReport } from '@/lib/research-stream';
+import { ResearchThoughtLine } from '@/components/research-thought-line';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -38,11 +40,7 @@ import {
 } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { CompanyResearchDepth } from '@/components/company-research-depth';
-import {
-  getPreferredAIModel,
-  getPreferredResearchModel,
-} from '@/lib/ai-models';
-import { useWorkspaceSession } from '@/components/workspace-session';
+import { CustomResearchReport } from '@/components/custom-research-report';
 import type { ListingOption } from '@/lib/market-listings';
 import {
   readStoredReport,
@@ -63,6 +61,7 @@ const signalStyle = {
   正面: 'bg-red-50 text-red-700 border-red-100',
   中性: 'bg-stone-50 text-stone-600 border-stone-200',
   负面: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+  待核验: 'bg-stone-50 text-stone-600 border-stone-200',
 };
 
 type Followup = {
@@ -94,40 +93,35 @@ async function fetchListingOptions(input: string): Promise<ListingOption[]> {
   }
 }
 
-function AnalysisSkeleton({ progress }: { progress: string }) {
+function AnalysisSkeleton({
+  progress,
+  researching,
+}: {
+  progress: string[];
+  researching: boolean;
+}) {
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-8 sm:px-6 lg:px-8">
-      <output
-        aria-live="polite"
-        className="flex items-start gap-4 rounded-2xl border border-primary/15 bg-primary/[0.045] p-5"
+      <section
+        aria-label="报告加载状态"
+        className="rounded-2xl border border-primary/15 bg-primary/[0.045] p-5"
       >
-        <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground">
-          <RefreshCw className="size-4 animate-spin" />
-        </span>
-        <div>
-          <h1 className="text-base font-semibold">研究正在进行中，请稍后</h1>
-          <p className="mt-1 text-xs leading-6 text-muted-foreground">
-            {progress}{' '}
-            深度研究分阶段执行，通常比普通问答耗时更长；请保持此页打开。
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {[
-              '识别公司与证券代码',
-              '检索官方来源',
-              '梳理利润驱动与反证',
-              '生成条件分析与结论',
-            ].map((item) => (
-              <span
-                key={item}
-                className="rounded-full border border-primary/15 bg-background px-2.5 py-1 text-[10px] text-muted-foreground"
-              >
-                {item}
-              </span>
-            ))}
-          </div>
-        </div>
-      </output>
-      <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
+        {researching ? (
+          <>
+            <h1 className="sr-only">正在生成研究报告</h1>
+            <ResearchThoughtLine steps={progress} />
+            <p className="mt-3 text-xs leading-6 text-muted-foreground">
+              深度研究分阶段执行，请保持此页打开。显示已用时间，不代表剩余时间。
+            </p>
+          </>
+        ) : (
+          <output aria-live="polite">正在读取报告信息，请稍后…</output>
+        )}
+      </section>
+      <div
+        aria-hidden="true"
+        className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] [&_[data-slot=skeleton]]:animate-none"
+      >
         <div className="space-y-6">
           <Skeleton className="h-40 rounded-2xl" />
           <Skeleton className="h-72 rounded-2xl" />
@@ -187,9 +181,10 @@ function FactorSection({ factor }: { factor: FactorGroup }) {
 }
 
 export default function CompanyResearch() {
-  const { user } = useWorkspaceSession();
-  const [progress, setProgress] = useState('正在确认研究对象…');
+  const [progress, setProgress] = useState<string[]>([]);
+  const [researching, setResearching] = useState(false);
   const [researchTaskId, setResearchTaskId] = useState('');
+  const fixedTaskId = useRef('');
   const researchController = useRef<AbortController | null>(null);
   const researchGeneration = useRef(0),
     mounted = useRef(true);
@@ -236,30 +231,29 @@ export default function CompanyResearch() {
     researchController.current?.abort();
     const controller = new AbortController();
     researchController.current = controller;
-    setProgress('正在确认研究对象…');
+    setProgress([
+      fixedTaskId.current ? '正在启动研究任务…' : '正在确认研究对象…',
+    ]);
+    setResearching(true);
     try {
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/x-ndjson',
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
+      const payload = await requestResearchReport(
+        {
+          ...(fixedTaskId.current ? { taskId: fixedTaskId.current } : {}),
           query: input,
           listingId,
           listing: listing || listings.find((item) => item.id === listingId),
-          // A display-policy timeout must not silently switch the saved model.
-          // The API always verifies the current allowlist before any AI call.
-          model: getPreferredResearchModel(
-            user?.modelPolicyUnavailable ? undefined : user?.allowedAIModels,
-          ),
-        }),
-      });
-      const payload = await readResearchResponse(
-        response,
-        setProgress,
-        setResearchTaskId,
+        },
+        {
+          signal: controller.signal,
+          onProgress: (message) =>
+            setProgress((steps) =>
+              steps.at(-1) === message ? steps : [...steps, message].slice(-8),
+            ),
+          onTask: (id) => {
+            fixedTaskId.current = id;
+            setResearchTaskId(id);
+          },
+        },
       );
       if (controller.signal.aborted) return;
       setReport(payload as CompanyReport);
@@ -268,6 +262,9 @@ export default function CompanyResearch() {
     } catch (cause) {
       if (controller.signal.aborted) return;
       setError(cause instanceof Error ? cause.message : '分析服务暂不可用');
+    } finally {
+      if (mounted.current && researchController.current === controller)
+        setResearching(false);
     }
   };
 
@@ -298,6 +295,60 @@ export default function CompanyResearch() {
     const preferredListingId = params.get('listing') || undefined;
     const savedId = params.get('saved');
     const initialResearch = window.setTimeout(async () => {
+      const taskId = params.get('task');
+      if (taskId) {
+        fixedTaskId.current = taskId;
+        setResearchTaskId(taskId);
+        const start = params.get('start') === '1';
+        params.delete('start');
+        window.history.replaceState(
+          {},
+          '',
+          `${window.location.pathname}?${params.toString()}`,
+        );
+        try {
+          const response = await fetch(
+            `/api/research-tasks?id=${encodeURIComponent(taskId)}`,
+            { cache: 'no-store', signal: AbortSignal.timeout(10000) },
+          );
+          const data = (await response.json()) as {
+            error?: string;
+            task?: { query: string; listing: ListingOption; status: string };
+            report?: CompanyReport;
+          };
+          if (!mounted.current) return;
+          if (!response.ok || !data.task)
+            throw new Error(data.error || '任务暂时无法读取。');
+          setActiveQuery(data.task.query);
+          setSelectedListingId(data.task.listing.id);
+          if (data.report) {
+            setReport(data.report);
+            setSaved(true);
+            return;
+          }
+          if (start && data.task.status === 'queued') {
+            await loadReport(
+              data.task.query,
+              data.task.listing.id,
+              data.task.listing,
+            );
+          } else {
+            setError(
+              data.task.status === 'running'
+                ? '此任务仍在运行，请从我的报告查看状态，勿重复启动。'
+                : data.task.status === 'cancelled'
+                  ? '此任务已取消，请返回自定义研报创建新任务。'
+                  : '尚未取得完整报告。可手动继续此任务，优先复用已保存分段。',
+            );
+          }
+        } catch (e) {
+          if (mounted.current)
+            setError(
+              e instanceof Error ? e.message : '任务无法读取，未自动启动研究。',
+            );
+        }
+        return;
+      }
       const savedEntry = savedId
         ? await readStoredReport(savedId).catch(() => null)
         : null;
@@ -338,6 +389,14 @@ export default function CompanyResearch() {
 
   const savePdf = () => {
     const originalTitle = document.title;
+    const auditDetails = Array.from(
+      document.querySelectorAll<HTMLDetailsElement>(
+        'details[data-research-audit]',
+      ),
+    ).map((node) => ({ node, open: node.open }));
+    auditDetails.forEach(({ node }) => {
+      node.open = true;
+    });
     if (report)
       document.title = `${report.companyName}-基本面分析-${new Date().toISOString().slice(0, 10)}`;
     else if (legacyReport)
@@ -345,6 +404,9 @@ export default function CompanyResearch() {
     window.print();
     window.setTimeout(() => {
       document.title = originalTitle;
+      auditDetails.forEach(({ node, open }) => {
+        node.open = open;
+      });
     }, 500);
   };
 
@@ -352,6 +414,8 @@ export default function CompanyResearch() {
     event.preventDefault();
     if (!companySearch.trim()) return;
     const next = companySearch.trim();
+    fixedTaskId.current = '';
+    setResearchTaskId('');
     window.history.replaceState(
       {},
       '',
@@ -361,9 +425,13 @@ export default function CompanyResearch() {
   };
 
   const chooseListing = (listingId: string) => {
+    fixedTaskId.current = '';
+    setResearchTaskId('');
     setSelectedListingId(listingId);
     const params = new URLSearchParams(window.location.search);
     params.delete('saved');
+    params.delete('task');
+    params.delete('start');
     params.set('query', activeQuery);
     params.set('listing', listingId);
     window.history.replaceState(
@@ -392,7 +460,6 @@ export default function CompanyResearch() {
           company: report.companyName,
           question,
           context: `${report.thesis} ${report.conclusion}`,
-          model: getPreferredAIModel(),
         }),
       });
       const payload = (await response.json()) as FollowupResponse;
@@ -421,12 +488,13 @@ export default function CompanyResearch() {
   };
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
+    <main className="mobile-report-layout min-h-screen bg-background text-foreground">
       <header className="print-hidden sticky top-0 z-30 border-b border-border bg-background/88 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-[1500px] items-center gap-4 px-4 sm:px-6 lg:px-8">
+        <div className="mx-auto flex h-16 max-w-[1500px] items-center gap-2 px-4 sm:gap-4 sm:px-6 lg:px-8">
+          <MobileWorkspaceNav active="research" />
           <a
             href="/"
-            className="flex items-center gap-2.5"
+            className="flex shrink-0 items-center gap-2.5"
             aria-label="返回首页"
           >
             <BrandMark />
@@ -459,6 +527,7 @@ export default function CompanyResearch() {
             variant="outline"
             size="sm"
             onClick={savePdf}
+            className="ml-auto shrink-0"
             disabled={!report && !legacyReport}
           >
             <Download className="size-3.5" />
@@ -468,7 +537,7 @@ export default function CompanyResearch() {
       </header>
 
       {researchTaskId ? (
-        <p className="my-3 text-sm text-muted-foreground">
+        <p className="print-hidden my-3 text-sm text-muted-foreground">
           任务已登记。
           <a className="text-primary underline" href="/reports">
             查看任务与已保存分段
@@ -477,7 +546,7 @@ export default function CompanyResearch() {
         </p>
       ) : null}
       {report?.researchRun ? (
-        <details className="my-4 border border-border p-4 text-sm">
+        <details className="print-hidden my-4 border border-border p-4 text-sm">
           <summary className="cursor-pointer">报告版本与证据快照</summary>
           <p className="mt-2">
             模型 {report.researchRun.model} · 框架{' '}
@@ -507,7 +576,7 @@ export default function CompanyResearch() {
         </details>
       ) : null}
       {!report && !legacyReport && !error && (
-        <AnalysisSkeleton progress={progress} />
+        <AnalysisSkeleton progress={progress} researching={researching} />
       )}
 
       {error && (
@@ -528,7 +597,7 @@ export default function CompanyResearch() {
             }
           >
             <RefreshCw className="size-4" />
-            重新分析
+            {researchTaskId ? '继续此任务' : '重新分析'}
           </Button>
         </div>
       )}
@@ -612,7 +681,8 @@ export default function CompanyResearch() {
         </div>
       ) : null}
 
-      {report && (
+      {report?.customReport && <CustomResearchReport report={report} />}
+      {report && !report.customReport && (
         <div className="mx-auto max-w-[1500px] px-4 py-7 sm:px-6 lg:px-8">
           <a
             href="/"
@@ -734,7 +804,10 @@ export default function CompanyResearch() {
                       综合判断
                     </p>
                     <p className="mt-2 text-2xl font-semibold">
-                      {report.stance}
+                      {report.degraded ||
+                      report.deepResearch?.review?.status === 'preliminary'
+                        ? '待核验'
+                        : report.stance}
                     </p>
                     <p className="mt-6 text-[10px] text-muted-foreground">
                       分析口径
@@ -933,6 +1006,13 @@ export default function CompanyResearch() {
                   ))}
                 </div>
               </section>
+              {report.deepResearch && (
+                <CompanyResearchDepth
+                  research={report.deepResearch}
+                  sources={report.sources}
+                  part="appendix"
+                />
+              )}
             </div>
 
             <aside className="print-hidden xl:sticky xl:top-24 xl:h-fit">

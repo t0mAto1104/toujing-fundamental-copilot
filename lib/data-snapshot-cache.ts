@@ -18,8 +18,35 @@ export type DataSnapshot<T> = {
   stale: boolean;
 };
 
-const memory = new Map<string, DataSnapshot<unknown>>();
+// D1 is authoritative. Bound isolate-local retention by size AND entry count;
+// research checkpoints must not accumulate object graphs for an entire hour.
+const MEMORY_BYTES = 8 * 1024 * 1024;
+const MEMORY_ENTRY_BYTES = 1024 * 1024;
+const memory = new Map<string, { row: SnapshotRow; bytes: number }>();
+let memoryBytes = 0;
 const inflight = new Map<string, Promise<DataSnapshot<unknown>>>();
+
+function remember(cacheKey: string, row: SnapshotRow) {
+  const drop = (key: string) => {
+    memoryBytes -= memory.get(key)?.bytes || 0;
+    memory.delete(key);
+  };
+  drop(cacheKey);
+  const bytes =
+    2 *
+    (cacheKey.length +
+      row.payload_json.length +
+      row.source_name.length +
+      row.source_url.length +
+      128);
+  if (bytes > MEMORY_ENTRY_BYTES) return;
+  // Keep bounded stale entries for outage fallback; a cooldown write must not
+  // evict the last successful snapshot merely because its freshness expired.
+  while (memoryBytes + bytes > MEMORY_BYTES || memory.size >= 128)
+    drop(memory.keys().next().value!);
+  memory.set(cacheKey, { row, bytes });
+  memoryBytes += bytes;
+}
 
 function parseRow<T>(row: SnapshotRow | null): DataSnapshot<T> | null {
   if (!row) return null;
@@ -38,9 +65,9 @@ function parseRow<T>(row: SnapshotRow | null): DataSnapshot<T> | null {
 }
 
 export async function readDataSnapshot<T>(cacheKey: string) {
-  const local = memory.get(cacheKey) as DataSnapshot<T> | undefined;
-  if (local && local.expiresAt > new Date().toISOString())
-    return { ...local, stale: false };
+  const entry = memory.get(cacheKey);
+  const local = entry ? parseRow<T>(entry.row) : null;
+  if (local && local.expiresAt > new Date().toISOString()) return local;
 
   const database = getReportDatabase();
   const fallback = local ? { ...local, stale: true } : null;
@@ -55,7 +82,7 @@ export async function readDataSnapshot<T>(cacheKey: string) {
       .bind(cacheKey)
       .first<SnapshotRow>();
     const parsed = parseRow<T>(row);
-    if (parsed) memory.set(cacheKey, parsed as DataSnapshot<unknown>);
+    if (parsed && row) remember(cacheKey, row);
     return parsed || fallback;
   } catch (error) {
     if (fallback) return fallback;
@@ -81,7 +108,14 @@ export async function storeDataSnapshot<T>(
     expiresAt,
     stale: false,
   };
-  memory.set(cacheKey, snapshot as DataSnapshot<unknown>);
+  const payload = JSON.stringify(value);
+  remember(cacheKey, {
+    payload_json: payload,
+    source_name: sourceName,
+    source_url: sourceUrl,
+    fetched_at: fetchedAt,
+    expires_at: expiresAt,
+  });
 
   const database = getReportDatabase();
   if (database) {
@@ -104,7 +138,7 @@ export async function storeDataSnapshot<T>(
       .bind(
         cacheKey,
         category,
-        JSON.stringify(value),
+        payload,
         sourceName,
         sourceUrl,
         fetchedAt,

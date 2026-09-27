@@ -1,14 +1,16 @@
 'use client';
 
+/* oxlint-disable jsx-a11y/no-noninteractive-tabindex -- Named overflow regions are focusable so keyboard users can scroll complete data lists. */
+
 /* oxlint-disable next/no-html-link-for-pages -- hosted RSC client transitions can be swallowed; full navigation is required. */
 
 import {
   ArrowUpRight,
-  Bell,
-  ChevronLeft,
-  ChevronRight,
+  ChevronUp,
+  ChevronDown,
   Clock3,
   ExternalLink,
+  Landmark,
   RefreshCw,
   Sparkles,
 } from 'lucide-react';
@@ -20,11 +22,13 @@ import { deduplicateNews } from '@/lib/news-evidence';
 import { BrandMark } from '@/components/brand-mark';
 import { IndustryHeatmap } from '@/components/industry-heatmap';
 import { IndustryReports } from '@/components/industry-reports';
+import { TradingViewPanel } from '@/components/tradingview-panel';
 import { HotStocks } from '@/components/market-signals';
 import { CompanySearchField } from '@/components/company-search-field';
 import { Button } from '@/components/ui/button';
 import { WorkspaceNav } from '@/components/workspace-nav';
-import { getPreferredAIModel } from '@/lib/ai-models';
+import { MobileWorkspaceNav } from '@/components/mobile-workspace-nav';
+import { NotebookButton } from '@/components/notebook-button';
 import { macroPolicyItems } from '@/lib/macro-policy-data';
 import type { ListingOption } from '@/lib/market-listings';
 
@@ -169,10 +173,7 @@ export default function Home() {
 
   const loadAIStatus = async () => {
     try {
-      const response = await fetch(
-        `/api/health?model=${encodeURIComponent(getPreferredAIModel())}`,
-        { cache: 'no-store' },
-      );
+      const response = await fetch('/api/health', { cache: 'no-store' });
       setAIStatus((await response.json()) as AIStatus);
     } catch {
       setAIStatus({ status: 'network', message: 'AI 状态检查暂时不可达。' });
@@ -292,13 +293,27 @@ export default function Home() {
         .slice(0, 18),
     [allNews, brief.macroNews],
   );
-  const timelineNews = useMemo(() => allNews.slice(0, 15), [allNews]);
+  const [timelineCategory, setTimelineCategory] = useState('全部');
+  const timelineCategories = [
+    '全部',
+    ...new Set(allNews.map((item) => item.category)),
+  ];
+  const timelineNews = useMemo(
+    () =>
+      allNews
+        .filter(
+          (item) =>
+            timelineCategory === '全部' || item.category === timelineCategory,
+        )
+        .slice(0, 15),
+    [allNews, timelineCategory],
+  );
   const latestPolicyKey = displayedPolicyNews[0]
     ? `${displayedPolicyNews[0].publishedAt}|${displayedPolicyNews[0].title}`
     : '';
 
   useEffect(() => {
-    policyScrollRef.current?.scrollTo({ left: 0 });
+    policyScrollRef.current?.scrollTo({ top: 0 });
   }, [latestPolicyKey]);
 
   const openCompanyData = (value: string, listing?: ListingOption) => {
@@ -308,12 +323,13 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-30 border-b border-border bg-background/88 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-[1500px] items-center gap-5 px-4 sm:px-6 lg:px-8">
+    <main className="workspace-shell market-overview min-h-screen bg-background text-foreground">
+      <header className="workspace-header sticky top-0 z-30 border-b border-border bg-background/88 backdrop-blur-xl">
+        <div className="workspace-header-inner mx-auto flex h-16 max-w-[1500px] items-center gap-2 px-4 sm:gap-5 sm:px-6 lg:px-8">
+          <MobileWorkspaceNav active="market" />
           <a
             href="/"
-            className="flex shrink-0 items-center gap-2.5"
+            className="workspace-brand flex shrink-0 items-center gap-2.5"
             aria-label="透镜基本面首页"
           >
             <BrandMark />
@@ -331,14 +347,7 @@ export default function Home() {
             placeholder="搜索公司或证券代码，例如：小米集团、600519"
           />
           <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="rounded-xl border border-transparent hover:border-border hover:bg-card"
-              aria-label="通知"
-            >
-              <Bell className="size-4" />
-            </Button>
+            <NotebookButton />
             <Button
               size="sm"
               className="rounded-xl px-4"
@@ -350,14 +359,14 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-[1500px] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <aside className="sticky top-16 hidden h-[calc(100vh-64px)] self-start overflow-y-auto border-r border-border bg-sidebar/55 px-5 py-6 lg:flex lg:flex-col [scrollbar-width:thin]">
+      <div className="workspace-grid mx-auto grid max-w-[1500px] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="workspace-sidebar sticky top-16 hidden h-[calc(100vh-64px)] self-start overflow-y-auto border-r border-border bg-sidebar/55 px-5 py-6 lg:flex lg:flex-col [scrollbar-width:thin]">
           <WorkspaceNav active="market" />
         </aside>
-        <section className="min-w-0 px-4 py-7 sm:px-6 lg:px-8 lg:py-8">
-          <div className="mb-6 flex flex-col justify-between gap-5 xl:flex-row xl:items-end">
-            <div>
-              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+        <section className="workspace-content min-w-0 px-4 py-7 sm:px-6 lg:px-8 lg:py-8">
+          <div className="overview-heading mb-6 flex flex-col justify-between gap-5 xl:flex-row xl:items-end">
+            <div className="overview-heading-copy">
+              <div className="overview-status mb-2 flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
                 <span className="relative flex size-2">
                   <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60" />
                   <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
@@ -371,7 +380,7 @@ export default function Home() {
                 <a
                   href="/research"
                   title={aiStatus.message}
-                  className={`mb-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium ${aiStatus.status === 'online' || aiStatus.status === 'configured' ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200' : 'bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200'}`}
+                  className={`overview-ai-status mb-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium ${aiStatus.status === 'online' || aiStatus.status === 'configured' ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200' : 'bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200'}`}
                 >
                   <span
                     className={`size-1.5 rounded-full ${aiStatus.status === 'online' || aiStatus.status === 'configured' ? 'bg-emerald-500' : 'bg-amber-500'}`}
@@ -417,21 +426,22 @@ export default function Home() {
               实时行情源暂时不可达，当前保留上次已验证数据并将在 60 秒后重试。
             </div>
           ) : null}
-          <section className="saas-panel">
+          <section className="overview-indices saas-panel">
             <div className="saas-panel-header">
               <div>
                 <p className="eyebrow">MARKET INDICES</p>
                 <h2 className="mt-1 text-lg font-semibold">核心指数</h2>
               </div>
-              <span className="text-[10px] text-muted-foreground">
+              <span className="indices-scroll-hint text-[10px] text-muted-foreground">
                 横向滑动查看全部
               </span>
             </div>
-            <div className="flex snap-x snap-mandatory overflow-x-auto [scrollbar-width:thin]">
+            <div className="indices-strip flex snap-x snap-mandatory overflow-x-auto [scrollbar-width:thin]">
               {displayedIndices.map((item) => (
-                <div
+                <a
                   key={item.name}
-                  className="flex min-w-[184px] snap-start items-center justify-between border-r border-border px-5 py-5 last:border-r-0"
+                  href="/quotes"
+                  className="index-tile flex min-w-[184px] snap-start items-center justify-between border-r border-border px-5 py-5 last:border-r-0"
                 >
                   <div>
                     <p className="text-xs text-muted-foreground">{item.name}</p>
@@ -444,168 +454,220 @@ export default function Home() {
                   >
                     {item.change}
                   </span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="saas-panel mt-6">
-            <div className="saas-panel-header">
-              <div>
-                <p className="eyebrow">MACRO SIGNALS</p>
-                <h2 className="mt-1 text-xl font-semibold tracking-tight">
-                  宏观与政策信号
-                </h2>
-                <p className="mt-1 text-[10px] text-muted-foreground">
-                  近期宏观政策快讯 · 官方月频数据保留原发布日
-                </p>
-                {brief.macroHistory &&
-                  (!brief.macroHistory.complete ||
-                    brief.macroHistory.stale) && (
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      {brief.macroHistory.stale
-                        ? '历史快讯正在更新，暂展示已核验记录'
-                        : '近期历史快讯尚未完整取回，以下为已核验记录'}
-                    </p>
-                  )}
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() =>
-                    policyScrollRef.current?.scrollBy({
-                      left: -600,
-                      behavior: 'smooth',
-                    })
-                  }
-                  className="grid size-8 place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground"
-                  aria-label="向左查看更多宏观政策"
-                >
-                  <ChevronLeft className="size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    policyScrollRef.current?.scrollBy({
-                      left: 600,
-                      behavior: 'smooth',
-                    })
-                  }
-                  className="grid size-8 place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground"
-                  aria-label="向右查看更多宏观政策"
-                >
-                  <ChevronRight className="size-3.5" />
-                </button>
-                <a
-                  href="/macro"
-                  className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                >
-                  查看全部 <ArrowUpRight className="size-3.5" />
                 </a>
-              </div>
-            </div>
-            <div
-              ref={policyScrollRef}
-              className="flex snap-x snap-mandatory overflow-x-auto border-b border-border [scrollbar-width:thin]"
-            >
-              {displayedPolicyNews.map((item) => (
-                <article
-                  key={item.title}
-                  className="group min-h-[178px] min-w-[270px] snap-start border-r border-border p-4 sm:min-w-[300px]"
-                >
-                  <div className="mb-2 flex items-center gap-2 text-[10px] text-muted-foreground">
-                    <span>{item.publishedAt}</span>
-                    <span className="rounded bg-primary/8 px-1.5 py-0.5 font-medium text-primary">
-                      {item.category}
-                    </span>
-                    <span className="ml-auto truncate">{item.sourceName}</span>
-                  </div>
-                  <a
-                    href={item.sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-start gap-2"
-                  >
-                    <h3 className="text-sm font-medium leading-6 group-hover:text-primary">
-                      {item.title}
-                    </h3>
-                    <ExternalLink className="mt-1.5 size-3 shrink-0 text-muted-foreground" />
-                  </a>
-                  <p className="mt-2 line-clamp-4 text-[11px] leading-5 text-muted-foreground">
-                    {item.summary}
-                  </p>
-                </article>
               ))}
-            </div>
-            <div className="m-4 flex items-start gap-3 rounded-xl border border-primary/15 bg-primary/[0.055] p-4">
-              <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" />
-              <div>
-                <p className="text-xs font-semibold">
-                  结构化基本面快照 · {brief.marketTone}
-                </p>
-                <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
-                  {brief.marketView}
-                </p>
-              </div>
             </div>
           </section>
 
-          <IndustryHeatmap />
-          <div className="mt-5">
-            <HotStocks compact />
-          </div>
-          <IndustryReports />
-          <section className="saas-panel mt-5">
-            <div className="saas-panel-header">
-              <div>
-                <p className="eyebrow">FINANCE TIMELINE</p>
-                <h2 className="mt-1 text-lg font-semibold">财经资讯时间线</h2>
-              </div>
-              <span className="inline-flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                <Clock3 className="size-3" />
-                HTTP 快讯双源 · {displayTime(brief.updatedAt)} 核验
-                {brief.stale ? ' · 后台更新中' : ''}
-              </span>
-            </div>
-            <div className="relative mx-5 border-l border-border pb-1">
-              {timelineNews.map((item, index) => (
-                <article
-                  key={`${item.title}-${item.publishedAt}`}
-                  className="relative grid gap-3 border-b border-border py-4 pl-6 sm:grid-cols-[92px_72px_minmax(0,1fr)_auto] sm:items-start"
-                >
-                  <span
-                    className={`absolute -left-[5px] top-6 size-2.5 rounded-full border-2 border-background ${index === 0 ? 'bg-primary' : 'bg-border'}`}
-                  />
-                  <time className="font-mono text-[10px] text-muted-foreground">
-                    {item.publishedAt}
-                  </time>
-                  <span className="w-fit rounded bg-primary/8 px-2 py-0.5 text-[10px] font-medium text-primary">
-                    {item.category}
-                  </span>
+          <div className="overview-workbench">
+            <div className="overview-primary">
+              <section className="overview-macro saas-panel">
+                <div className="saas-panel-header">
                   <div>
-                    <a
-                      href={item.sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-start gap-2 text-sm font-medium leading-6 hover:text-primary"
-                    >
-                      {item.title}
-                      <ArrowUpRight className="mt-1.5 size-3 shrink-0" />
-                    </a>
-                    <p className="mt-1 text-xs leading-6 text-muted-foreground">
-                      {item.summary}
-                    </p>
+                    <p className="eyebrow">MACRO SIGNALS</p>
+                    <h2 className="mt-1 text-xl font-semibold tracking-tight">
+                      宏观与政策信号
+                    </h2>
+                    {brief.macroHistory &&
+                      (!brief.macroHistory.complete ||
+                        brief.macroHistory.stale) && (
+                        <p className="macro-history-notice mt-1 text-[10px] text-muted-foreground">
+                          {brief.macroHistory.stale
+                            ? '历史快讯正在更新，暂展示已核验记录'
+                            : '近期历史快讯尚未完整取回，以下为已核验记录'}
+                        </p>
+                      )}
                   </div>
-                  <span className="hidden text-[10px] text-muted-foreground sm:block">
-                    {item.sourceName}
-                  </span>
-                </article>
-              ))}
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        policyScrollRef.current?.scrollBy({
+                          top: -240,
+                          behavior: window.matchMedia(
+                            '(prefers-reduced-motion: reduce)',
+                          ).matches
+                            ? 'instant'
+                            : 'smooth',
+                        })
+                      }
+                      className="grid size-8 place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground"
+                      aria-label="向上查看更多宏观政策"
+                    >
+                      <ChevronUp className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        policyScrollRef.current?.scrollBy({
+                          top: 240,
+                          behavior: window.matchMedia(
+                            '(prefers-reduced-motion: reduce)',
+                          ).matches
+                            ? 'instant'
+                            : 'smooth',
+                        })
+                      }
+                      className="grid size-8 place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground"
+                      aria-label="向下查看更多宏观政策"
+                    >
+                      <ChevronDown className="size-3.5" />
+                    </button>
+                    <a
+                      href="/macro"
+                      className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                    >
+                      查看全部 <ArrowUpRight className="size-3.5" />
+                    </a>
+                  </div>
+                </div>
+                <section
+                  ref={policyScrollRef}
+                  className="policy-strip overview-scroll border-b border-border"
+                  tabIndex={0}
+                  aria-label="宏观与政策信号列表"
+                >
+                  {displayedPolicyNews.map((item) => (
+                    <article
+                      key={item.title}
+                      className="policy-card group border-b border-border p-4"
+                    >
+                      <span className="policy-icon" title={item.category}>
+                        <Landmark aria-hidden="true" className="size-5" />
+                        <span className="sr-only">{item.category}</span>
+                      </span>
+                      <a
+                        href={item.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-start gap-2"
+                        title={item.title}
+                      >
+                        <h3 className="text-sm font-medium leading-6 group-hover:text-primary">
+                          {item.title}
+                        </h3>
+                        <ExternalLink className="mt-1.5 size-3 shrink-0 text-muted-foreground" />
+                      </a>
+                      <p className="mt-2 line-clamp-4 text-[11px] leading-5 text-muted-foreground">
+                        {item.summary}
+                      </p>
+                      <div className="policy-meta text-xs text-muted-foreground">
+                        <time title={item.publishedAt}>
+                          {item.publishedAt.replace('T', ' ').slice(5, 16)}
+                        </time>
+                        <span className="policy-source" title={item.sourceName}>
+                          {item.sourceName}
+                        </span>
+                      </div>
+                    </article>
+                  ))}
+                </section>
+                <details className="macro-snapshot rounded-lg border border-primary/15 bg-primary/[0.055]">
+                  <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold">
+                    <Sparkles
+                      className="size-4 shrink-0 text-primary"
+                      aria-hidden="true"
+                    />
+                    结构化基本面快照 · {brief.marketTone}
+                    <span className="ml-auto shrink-0 text-primary">详情</span>
+                  </summary>
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    {brief.marketView}
+                  </p>
+                </details>
+              </section>
+
+              <IndustryHeatmap />
+              <div className="overview-tables">
+                <div className="overview-hot-stocks min-w-0">
+                  <HotStocks compact />
+                </div>
+                <IndustryReports />
+              </div>
             </div>
-          </section>
+            <div className="overview-secondary">
+              <TradingViewPanel kind="news" compact />
+              <section className="overview-timeline saas-panel">
+                <div className="saas-panel-header">
+                  <div>
+                    <p className="eyebrow">FINANCE TIMELINE</p>
+                    <h2 className="mt-1 text-lg font-semibold">
+                      财经资讯时间线
+                    </h2>
+                  </div>
+                  <span
+                    title={`HTTP 快讯双源 · ${displayTime(brief.updatedAt)} 核验${brief.stale ? ' · 后台更新中' : ''}`}
+                    className="timeline-status inline-flex items-center gap-1.5 text-[10px] text-muted-foreground"
+                  >
+                    <Clock3 className="size-3" />
+                    {displayTime(brief.updatedAt)}
+                    {brief.stale ? ' · 后台更新中' : ''}
+                  </span>
+                </div>
+                <fieldset
+                  className="timeline-filters"
+                  aria-label="财经资讯分类"
+                >
+                  {timelineCategories.map((category) => (
+                    <button
+                      key={category}
+                      type="button"
+                      aria-pressed={timelineCategory === category}
+                      onClick={() => setTimelineCategory(category)}
+                    >
+                      {category}
+                    </button>
+                  ))}
+                </fieldset>
+                <section
+                  className="overview-scroll timeline-scroll relative mx-5 border-l border-border pb-1"
+                  tabIndex={0}
+                  aria-label="财经资讯时间线列表"
+                >
+                  {timelineNews.map((item, index) => (
+                    <article
+                      key={`${item.title}-${item.publishedAt}`}
+                      className="relative grid gap-3 border-b border-border py-4 pl-6 sm:grid-cols-[92px_72px_minmax(0,1fr)_auto] sm:items-start"
+                    >
+                      <span
+                        className={`absolute -left-[5px] top-6 size-2.5 rounded-full border-2 border-background ${index === 0 ? 'bg-primary' : 'bg-border'}`}
+                      />
+                      <time
+                        title={item.publishedAt}
+                        className="font-mono text-[10px] text-muted-foreground"
+                      >
+                        {item.publishedAt.replace('T', ' ').slice(5, 16)}
+                      </time>
+                      <div className="timeline-copy">
+                        <a
+                          href={item.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={item.title}
+                          className="inline-flex items-start gap-2 text-sm font-medium leading-6 hover:text-primary"
+                        >
+                          {item.title}
+                          <ArrowUpRight className="mt-1.5 size-3 shrink-0" />
+                        </a>
+                        <p className="mt-1 text-xs leading-6 text-muted-foreground">
+                          {item.summary}
+                        </p>
+                      </div>
+                      <span
+                        title={item.sourceName}
+                        className="timeline-source text-[10px] text-muted-foreground"
+                      >
+                        {item.sourceName}
+                      </span>
+                    </article>
+                  ))}
+                </section>
+              </section>
+            </div>
+          </div>
 
           <p className="mt-6 text-[10px] leading-4 text-muted-foreground">
-            {market?.methodology || '界面数据为行情源加载期间的示例快照。'}{' '}
+            {market?.methodology || '正在连接行情源，数据以接口实际返回为准。'}{' '}
             本页面仅作信息分析，不构成投资建议。
           </p>
         </section>

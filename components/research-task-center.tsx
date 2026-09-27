@@ -6,12 +6,12 @@ import { Input } from '@/components/ui/input';
 import { useWorkspaceSession } from '@/components/workspace-session';
 import {
   AI_MODELS,
-  getPreferredResearchModel,
   defaultResearchModel,
   type AIModelId,
 } from '@/lib/ai-models';
 import type { ResearchTaskView } from '@/lib/research-tasks';
-import { readResearchResponse } from '@/lib/research-stream';
+import { requestResearchReport } from '@/lib/research-stream';
+import { ResearchThoughtLine } from '@/components/research-thought-line';
 import { compareReportVersions } from '@/lib/report-comparison';
 import type { CompanyReport } from '@/lib/research-types';
 const labels: Record<string, string> = {
@@ -52,6 +52,7 @@ export function ResearchTaskCenter() {
     <TaskWorkspace
       key={user.email}
       allowedModels={user.allowedAIModels || []}
+      preferredModel={user.preferredResearchModel}
     />
   ) : (
     <p className="my-5 text-sm text-muted-foreground">
@@ -59,13 +60,19 @@ export function ResearchTaskCenter() {
     </p>
   );
 }
-function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
+function TaskWorkspace({
+  allowedModels,
+  preferredModel,
+}: {
+  allowedModels: AIModelId[];
+  preferredModel?: AIModelId;
+}) {
   const [tasks, setTasks] = useState<ResearchTaskView[]>([]),
     [error, setError] = useState(''),
     [busy, setBusy] = useState('');
   const [companies, setCompanies] = useState(''),
-    [model, setModel] = useState<AIModelId>(() =>
-      defaultResearchModel(allowedModels),
+    [model, setModel] = useState<AIModelId>(
+      () => preferredModel || defaultResearchModel(allowedModels),
     );
   const [tokens, setTokens] = useState('80000'),
     [usd, setUsd] = useState('2'),
@@ -89,7 +96,12 @@ function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
       }),
     );
     if (alive.current) {
-      setTasks(data.tasks || []);
+      setTasks((previous) =>
+        (data.tasks || []).map((task) => {
+          const current = previous.find((item) => item.id === task.id);
+          return current && current.updatedAt > task.updatedAt ? current : task;
+        }),
+      );
       if (!budgetInitialized.current && data.budgetPolicy) {
         setTokens(String(data.budgetPolicy.tokens));
         setUsd(String(data.budgetPolicy.usd));
@@ -107,15 +119,11 @@ function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
   }, []);
   useEffect(() => {
     const timer = setTimeout(
-      () =>
-        setModel(
-          getPreferredResearchModel(allowedModels) ||
-            defaultResearchModel(allowedModels),
-        ),
+      () => setModel(preferredModel || defaultResearchModel(allowedModels)),
       0,
     );
     return () => clearTimeout(timer);
-  }, [allowedModels]);
+  }, [allowedModels, preferredModel]);
   const running = tasks.some((task) =>
     ['running', 'cancelling'].includes(task.status),
   );
@@ -134,23 +142,24 @@ function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
     setError('');
     controller.current = new AbortController();
     try {
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/x-ndjson',
+      await requestResearchReport(
+        { taskId: task.id },
+        {
+          signal: controller.current.signal,
+          onProgress: (message, updatedAt) =>
+            setTasks((items) =>
+              items.map((item) =>
+                item.id === task.id
+                  ? {
+                      ...item,
+                      status: 'running',
+                      message,
+                      updatedAt: updatedAt || item.updatedAt,
+                    }
+                  : item,
+              ),
+            ),
         },
-        body: JSON.stringify({ taskId: task.id }),
-        signal: controller.current.signal,
-      });
-      await readResearchResponse(response, (message) =>
-        setTasks((items) =>
-          items.map((item) =>
-            item.id === task.id
-              ? { ...item, status: 'running', message }
-              : item,
-          ),
-        ),
       );
       return true;
     } catch (e) {
@@ -368,10 +377,15 @@ function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
         ) : null}
         {!tasks.length ? (
           <p className="text-sm text-muted-foreground">
-            还没有新版研究任务。旧报告保留在下方。
+            还没有新版研究任务。已保存的报告可在上方查看。
           </p>
         ) : (
-          <div className="divide-y divide-border">
+          <div
+            role="region"
+            aria-label="研究任务列表"
+            tabIndex={0}
+            className="max-h-[min(60dvh,36rem)] overflow-y-auto divide-y divide-border [scrollbar-gutter:stable] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          >
             {tasks.map((task) => (
               <article
                 key={task.id}
@@ -389,7 +403,14 @@ function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
                     {new Date(task.createdAt).toLocaleString('zh-CN')} ·{' '}
                     {task.batchId ? '批量任务' : '单份研究'}
                   </p>
-                  <p className="mt-1 text-sm">{task.error || task.message}</p>
+                  {task.status === 'running' && !task.error ? (
+                    <ResearchThoughtLine
+                      showTimer={false}
+                      steps={[task.message || '正在等待研究进度…']}
+                    />
+                  ) : (
+                    <p className="mt-1 text-sm">{task.error || task.message}</p>
+                  )}
                   {!!task.completedStages.length && (
                     <p className="mt-1 text-sm text-primary">
                       已保存：
@@ -583,6 +604,32 @@ function TaskWorkspace({ allowedModels }: { allowedModels: AIModelId[] }) {
         {difference ? (
           <div className="space-y-3 border-t border-border pt-4 text-sm">
             <h3 className="font-semibold">版本差异</h3>
+            <p>
+              原始证据：
+              {difference.evidenceChanged === null
+                ? '旧版未记录指纹'
+                : difference.evidenceChanged
+                  ? '已变化'
+                  : '抽取快照相同'}
+              ；研究方法版本：
+              {difference.methodChanged === null
+                ? '旧版未记录'
+                : difference.methodChanged
+                  ? '已变化'
+                  : '相同'}
+              。
+            </p>
+            {difference.changedCalculations.map((c) => (
+              <p key={c.label + c.period}>
+                {c.label} · {c.period}：{c.before} → {c.after} {c.unit}
+                （同口径计算结果变化，可能涉及修订）
+              </p>
+            ))}
+            <p>新增缺口：{difference.addedGaps.join('；') || '无'}。</p>
+            <p>
+              不再列示的缺口：{difference.removedGaps.join('；') || '无'}
+              。不再列示不等于已经解决。
+            </p>
             <p className="text-muted-foreground">
               只对齐同一指标与期间；跨期分别列示，不计算误导性增幅。文字变化不等于风险已经消失。
             </p>

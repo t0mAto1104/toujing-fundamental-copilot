@@ -68,7 +68,8 @@ export async function searchQuoteSecurities(
       .map((item) => listing(item.symbol, item.name));
     const snapshot = await abortable(
       getOrRefreshDataSnapshot({
-        cacheKey: `quote-search:v1:${input.toLowerCase()}`,
+        // v1 may contain empty/partial results from the missing STAR classification.
+        cacheKey: `quote-search:v2:${input.toLowerCase()}`,
         category: 'quote-search',
         ttlMs: 3600_000,
         sourceName: '东方财富证券搜索',

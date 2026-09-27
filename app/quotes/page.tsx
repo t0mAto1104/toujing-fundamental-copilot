@@ -1,4 +1,6 @@
 'use client';
+import { EtfShares } from '@/components/market-extensions';
+import { QuoteMicrostructure } from '@/components/quote-microstructure';
 
 /* oxlint-disable next/no-html-link-for-pages -- preserve the site's full-navigation/auth behavior. */
 
@@ -101,7 +103,7 @@ function OrderBook({
     ...(book?.bids || []).map((row) => ({ ...row, side: '买' })),
   ];
   return (
-    <section className="saas-panel" aria-label="五档盘口">
+    <section aria-label="五档盘口">
       <div className="saas-panel-header !flex-row !items-center">
         <h2 className="text-sm font-semibold">五档盘口</h2>
         <span className="text-xs text-muted-foreground">价格 / 量（手）</span>
@@ -565,6 +567,21 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
             buttonLabel="查看行情"
           />
         </div>
+        <nav aria-label="行情市场" className="flex gap-2 text-sm">
+          <a
+            href="/quotes"
+            aria-current="page"
+            className="inline-flex min-h-11 items-center rounded-lg border border-primary/30 bg-primary/10 px-4 font-medium text-primary"
+          >
+            A 股行情
+          </a>
+          <a
+            href="/global"
+            className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 hover:bg-muted"
+          >
+            全球市场
+          </a>
+        </nav>
         {searching || searchError ? (
           <output
             className={`flex items-center gap-2 text-sm ${searchError ? 'text-destructive' : 'text-muted-foreground'}`}
@@ -581,7 +598,7 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
         ) : null}
 
         <Tabs value={view} onValueChange={(value) => setView(String(value))}>
-          <TabsList aria-label="行情数据视图">
+          <TabsList className="quotes-view-tabs" aria-label="行情数据视图">
             <TabsTrigger value="quotes">大盘与个股</TabsTrigger>
             <TabsTrigger value="hot">强势股与题材</TabsTrigger>
             <TabsTrigger value="industry">行业股票排行</TabsTrigger>
@@ -642,6 +659,7 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
                 <Button
                   size="sm"
                   variant="ghost"
+                  data-preserve-mobile-size
                   disabled={quotes.loading || kline.loading}
                   onClick={() => {
                     quotes.refresh();
@@ -707,7 +725,7 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
                 className="saas-panel min-w-0"
                 aria-label="证券行情与 K 线"
               >
-                <div className="border-b border-border p-5">
+                <div className="border-b border-border p-4 sm:p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h2 className="text-xl font-semibold">
@@ -762,7 +780,7 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
                       symbol={selected.symbol}
                     />
                   ) : null}
-                  <dl className="mt-5 grid grid-cols-3 gap-x-4 gap-y-3 text-sm sm:grid-cols-4">
+                  <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 text-sm min-[400px]:grid-cols-3 sm:grid-cols-4">
                     {(
                       [
                         ['今开', marketNumber(quote?.open, precision)],
@@ -814,7 +832,7 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
                       : ''}
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-3">
+                <div className="quotes-chart-controls flex flex-wrap items-center justify-between gap-3 border-b border-border p-3">
                   <fieldset
                     className="flex flex-wrap gap-1"
                     aria-label="K 线周期"
@@ -920,13 +938,18 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
               </section>
 
               <div className="min-w-0 space-y-5">
-                <OrderBook
-                  quote={quote}
+                <QuoteMicrostructure
+                  key={selected.symbol}
                   symbol={selected.symbol}
-                  stale={
-                    !!quotes.error || !!quotes.data?.stale || outdatedQuote
-                  }
-                />
+                >
+                  <OrderBook
+                    quote={quote}
+                    symbol={selected.symbol}
+                    stale={
+                      !!quotes.error || !!quotes.data?.stale || outdatedQuote
+                    }
+                  />
+                </QuoteMicrostructure>
                 <aside className="saas-panel" aria-labelledby="watchlist-title">
                   <div className="saas-panel-header !flex-row !items-center">
                     <h2
@@ -1078,6 +1101,9 @@ function QuotesWorkspace({ user }: { user: SessionUser }) {
             )}
             {!index && !etf ? (
               <StockSignals key={selected.symbol} symbol={selected.symbol} />
+            ) : null}
+            {etf ? (
+              <EtfShares key={selected.symbol} symbol={selected.symbol} />
             ) : null}
           </TabsContent>
         </Tabs>

@@ -70,7 +70,7 @@ export const companySchema = {
             type: 'string',
             enum: ['政策', '行业', '资金', '财报', '宏观'],
           },
-          signal: { type: 'string', enum: ['正面', '中性', '负面'] },
+          signal: { type: 'string', enum: ['正面', '中性', '负面', '待核验'] },
           title: { type: 'string' },
           summary: { type: 'string' },
           evidence: {

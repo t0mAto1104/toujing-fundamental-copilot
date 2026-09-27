@@ -317,7 +317,7 @@ void test('framework has no reference-company numbers and uses bounded resumable
   assert.match(pipeline, /Promise\.allSettled\(jobs\)/);
   assert.match(pipeline, /webSearch: false/);
   const accessGuard = route.indexOf('await requireResearchAccess');
-  const bodyRead = route.indexOf('await request.text');
+  const bodyRead = route.indexOf('await readAIRequestJSON');
   assert.ok(
     accessGuard >= 0 && bodyRead > accessGuard,
     'authentication precedes body processing',

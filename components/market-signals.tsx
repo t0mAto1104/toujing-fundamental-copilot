@@ -77,12 +77,14 @@ export function SignalFrame<T>({
   children,
   controls,
   note,
+  compact = false,
 }: {
   title: string;
   feed: Feed<T>;
   children: ReactNode;
   controls?: ReactNode;
   note?: string;
+  compact?: boolean;
 }) {
   return (
     <section className="saas-panel min-w-0">
@@ -114,7 +116,15 @@ export function SignalFrame<T>({
       ) : (
         children
       )}
-      <div className="space-y-1 border-t border-border px-4 py-3 text-xs leading-5 text-muted-foreground">
+      <details
+        open={compact ? undefined : true}
+        className="signal-methodology space-y-1 border-t border-border px-4 py-3 text-xs leading-5 text-muted-foreground"
+      >
+        {compact ? (
+          <summary className="cursor-pointer">来源与数据口径</summary>
+        ) : (
+          <summary className="hidden">来源与数据口径</summary>
+        )}
         {note ? <p>{note}</p> : null}
         {feed.data ? (
           <p>
@@ -130,7 +140,7 @@ export function SignalFrame<T>({
             {feed.data.stale ? ' · 缓存已过期' : ''}
           </p>
         ) : null}
-      </div>
+      </details>
     </section>
   );
 }
@@ -217,6 +227,7 @@ export function HotStocks({
   return (
     <SignalFrame
       title="强势股与题材"
+      compact={compact}
       feed={feed}
       controls={
         compact ? (
@@ -592,8 +603,14 @@ export function BoardFunds() {
   const [kind, setKind] = useState<BoardKind>('industry');
   const [period, setPeriod] = useState<BoardPeriod>('today');
   const [page, setPage] = useState(1);
-  const feed = useSignal<Paged<BoardFlow>>(
-    `kind=boards&type=${kind}&period=${period}&page=${page}`,
+  const url = `/api/market-signals?kind=boards&type=${kind}&period=${period}&page=${page}`;
+  const feed = useMarketFeed<SignalSnapshot<Paged<BoardFlow>>>(
+    url,
+    60_000,
+    22_000,
+    true,
+    true,
+    `${url}&refresh=1`,
   );
   return (
     <SignalFrame
@@ -629,7 +646,7 @@ export function BoardFunds() {
           </select>
         </>
       }
-      note="按主力净流额降序排列；不同概念可能重叠，不可加总成全市场净额。东方财富分类与申万行业体系不同。"
+      note="盘中每分钟更新，返回前台时重新检查；手动刷新受15秒共享保护和失败冷却限制。按主力净流额降序排列，不同概念可能重叠，不可加总成全市场净额；东方财富分类不同于申万行业。"
     >
       {feed.data ? (
         <>

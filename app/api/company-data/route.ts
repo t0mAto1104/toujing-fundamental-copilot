@@ -12,6 +12,8 @@ import {
 } from '@/lib/market-listings';
 import { readDataSnapshot, storeDataSnapshot } from '@/lib/data-snapshot-cache';
 import { abortable, requestDeadline, within } from '@/lib/request-deadline';
+import { getCompanyHistoryMetrics } from '@/lib/company-history-metrics';
+import { getCompanyPeers } from '@/lib/a-stock-peers';
 
 type QuickResult<T> = { ready: true; value: T } | { ready: false; value: null };
 
@@ -41,7 +43,12 @@ export async function GET(request: Request) {
       { status: 400 },
     );
 
-  const deadline = requestDeadline(12_000, request.signal);
+  const metricsOnly = params.get('section') === 'metrics';
+  const peersOnly = params.get('section') === 'peers';
+  const deadline = requestDeadline(
+    peersOnly ? 33_000 : metricsOnly ? 19_000 : 12_000,
+    request.signal,
+  );
   try {
     const { listing, listings } = await abortable(
       resolveCompanySecurity(query, listingId, deadline.signal),
@@ -54,6 +61,24 @@ export async function GET(request: Request) {
             '没有识别到可核验的上市公司。非上市公司或非金融内容不会触发 AI 研究。',
         },
         { status: 422 },
+      );
+
+    // Independent, opt-in data request: slow historical/ownership sources must
+    // never block the existing price and company-data response or AI pipeline.
+    if (metricsOnly || peersOnly)
+      return Response.json(
+        await abortable<unknown>(
+          peersOnly
+            ? getCompanyPeers(listing, deadline.signal)
+            : getCompanyHistoryMetrics(listing, deadline.signal),
+          deadline.signal,
+        ),
+        {
+          headers: {
+            'Cache-Control': 'private, no-store',
+            'X-AI-Research': 'not-used',
+          },
+        },
       );
 
     const quoteKey = `company-quote:v1:${listing.id}`;

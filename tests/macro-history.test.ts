@@ -178,5 +178,5 @@ void test('both macro surfaces use the independent history feed and sidebar uses
   const nav = readFileSync('components/workspace-nav.tsx', 'utf8');
   assert.ok(nav.includes('{SITE_VERSION}'));
   assert.ok(!nav.includes('V3.7'));
-  assert.equal(SITE_VERSION, 'V3.8');
+  assert.match(SITE_VERSION, /^V\d+\.\d+\.\d+$/);
 });

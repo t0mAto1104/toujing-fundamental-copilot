@@ -1,6 +1,15 @@
-import { reasoningEffortForModel, resolveAIModel } from '@/lib/ai-models';
+import { reasoningEffortForModel } from '@/lib/ai-models';
 import { recordAIUsage } from '@/lib/ai-usage';
 import { reserveResearchCall } from '@/lib/research-tasks';
+import { resolveUserAICredential } from '@/lib/ai-credentials';
+import {
+  requireResearchAccess,
+  resolvePermittedAIModel,
+  ResearchAccessError,
+} from '@/lib/site-users';
+import { OpenAIResearchError, redactAISecrets } from '@/lib/ai-errors';
+export { OpenAIResearchError } from '@/lib/ai-errors';
+export type { OpenAIErrorKind } from '@/lib/ai-errors';
 
 type JsonSchema = Record<string, unknown>;
 
@@ -22,10 +31,13 @@ export type ResearchOptions = {
     researchTaskId?: string;
     leaseId?: string;
     reservationId?: string;
+    billingSource?: 'personal' | 'site';
   };
   timeoutMs?: number;
   searchContextSize?: 'low' | 'medium';
   requireSearch?: boolean;
+  // Server-owned allowlist. Never accept these domains from request bodies.
+  searchAllowedDomains?: readonly string[];
   verbosity?: 'low' | 'medium';
   reasoningEffort?: 'low' | 'medium';
 };
@@ -42,33 +54,12 @@ type OpenAIOutput = {
   action?: { sources?: Array<{ url?: string; title?: string }> };
 };
 
-export type OpenAIErrorKind =
-  | 'missing_key'
-  | 'authentication'
-  | 'credits'
-  | 'rate_limit'
-  | 'access'
-  | 'invalid_output'
-  | 'api_error';
-
-export class OpenAIResearchError extends Error {
-  constructor(
-    public kind: OpenAIErrorKind,
-    public status: number,
-    message: string,
-    public retryable: boolean,
-  ) {
-    super(message);
-    this.name = 'OpenAIResearchError';
-  }
-}
-
 function classifyOpenAIError(status: number, code: string, message = '') {
   if (status === 401 || code === 'invalid_api_key') {
     return new OpenAIResearchError(
       'authentication',
       status,
-      '网站使用的 API 密钥未通过认证，请更新站点密钥。',
+      '当前账户使用的 API 密钥未通过认证，请在 AI 连接设置中处理；不会自动更换计费来源。',
       false,
     );
   }
@@ -80,7 +71,7 @@ function classifyOpenAIError(status: number, code: string, message = '') {
     return new OpenAIResearchError(
       'credits',
       status,
-      '当前站点密钥所属的 API 项目没有可用额度；请确认余额与密钥属于同一组织和项目。',
+      '当前账户使用的 API 项目没有可用额度；请检查该密钥所属项目，不会改用站点额度。',
       false,
     );
   }
@@ -88,11 +79,10 @@ function classifyOpenAIError(status: number, code: string, message = '') {
     code === 'rate_limit_exceeded' ||
     /rate limit|tokens per min/i.test(message)
   ) {
-    const retry = message.match(/try again in ([^.]+(?:\.[0-9]+s)?)/i)?.[1];
     return new OpenAIResearchError(
       'rate_limit',
       status,
-      `当前 API 项目已达到模型令牌限额${retry ? `，预计 ${retry} 后可重试` : ''}。请稍后手动重试。`,
+      '当前 API 项目已达到速率限额，请稍后手动重试；不会更换计费来源。',
       true,
     );
   }
@@ -141,6 +131,7 @@ export async function runStructuredResearch<T>({
   timeoutMs = 45_000,
   searchContextSize = 'low',
   requireSearch = false,
+  searchAllowedDomains,
   verbosity = 'low',
   reasoningEffort,
 }: ResearchOptions): Promise<{
@@ -157,16 +148,23 @@ export async function runStructuredResearch<T>({
     webSearchRequests: number;
   };
 }> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey)
-    throw new OpenAIResearchError(
-      'missing_key',
-      500,
-      '站点尚未配置 OPENAI_API_KEY。',
-      false,
+  // Final backstop: every paid stage, including resume/retry, rechecks the
+  // authenticated principal, policy and current credential. No global key cache.
+  const access = await requireResearchAccess();
+  if (access.user.userId !== audit.userId)
+    throw new ResearchAccessError(
+      '请求用户与当前登录账户不一致。',
+      'request_forbidden',
+      403,
     );
-
-  const model = resolveAIModel(requestedModel || process.env.OPENAI_MODEL);
+  const model = resolvePermittedAIModel(
+    access,
+    requestedModel || process.env.OPENAI_MODEL,
+  );
+  const { apiKey, billingSource } = await resolveUserAICredential(access.user);
+  audit = { ...audit, billingSource };
+  prompt = redactAISecrets(prompt, apiKey);
+  if (instructions) instructions = redactAISecrets(instructions, apiKey);
   signal?.throwIfAborted();
   if (audit.researchTaskId && audit.leaseId) {
     audit = {
@@ -197,9 +195,14 @@ export async function runStructuredResearch<T>({
     controller.abort();
   }, timeoutMs);
   let response: Response | undefined;
+  let requestId: string | null = null;
   try {
     response = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
+      // Workers supports only follow/manual. Never follow a redirect carrying
+      // the user's Authorization header; reject 3xx explicitly below.
+      redirect: 'manual',
+      credentials: 'omit',
       signal: controller.signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -217,8 +220,14 @@ export async function runStructuredResearch<T>({
               max_tool_calls: maxToolCalls,
               tools: [
                 {
-                  type: requireSearch ? 'web_search' : 'web_search_preview',
+                  type:
+                    requireSearch || searchAllowedDomains
+                      ? 'web_search'
+                      : 'web_search_preview',
                   search_context_size: searchContextSize,
+                  ...(searchAllowedDomains
+                    ? { filters: { allowed_domains: searchAllowedDomains } }
+                    : {}),
                 },
               ],
               include: ['web_search_call.action.sources'],
@@ -264,14 +273,26 @@ export async function runStructuredResearch<T>({
         },
       }),
     });
+    const candidateId = response.headers.get('x-request-id');
+    requestId =
+      candidateId &&
+      /^req_[A-Za-z0-9_-]{1,180}$/.test(candidateId) &&
+      redactAISecrets(candidateId, apiKey) === candidateId
+        ? candidateId
+        : null;
     // Keep the deadline and caller cancellation active until the response body
     // completes, not merely until its HTTP headers arrive.
-    const completeBody = await response.arrayBuffer();
-    response = new Response(completeBody, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
+    const completeBody = redactAISecrets(await response.text(), apiKey);
+    const safeHeaders = new Headers(response.headers);
+    if (!requestId) safeHeaders.delete('x-request-id');
+    response = new Response(
+      [204, 205, 304].includes(response.status) ? null : completeBody,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        headers: safeHeaders,
+      },
+    );
   } catch {
     const cancelled = signal?.aborted && !timedOut;
     const errorCode = timedOut
@@ -283,7 +304,7 @@ export async function runStructuredResearch<T>({
       ...audit,
       model,
       status: controller.signal.aborted ? 'failed' : 'network_error',
-      requestId: response?.headers.get('x-request-id'),
+      requestId,
       errorCode,
     }).catch(() => undefined);
     console.info(
@@ -332,13 +353,21 @@ export async function runStructuredResearch<T>({
     );
 
   if (!response.ok) {
-    const requestError = await errorFromResponse(response);
+    const redirected = response.status >= 300 && response.status < 400;
+    const requestError = redirected
+      ? new OpenAIResearchError(
+          'api_error',
+          502,
+          'AI 服务返回了不允许的重定向，已安全阻止；请求未转发至其他地址。',
+          false,
+        )
+      : await errorFromResponse(response);
     await recordAIUsage({
       ...audit,
       model,
       status: 'failed',
-      requestId: response.headers.get('x-request-id'),
-      errorCode: requestError.kind,
+      requestId,
+      errorCode: redirected ? 'redirect_blocked' : requestError.kind,
     }).catch(() => undefined);
     throw requestError;
   }
@@ -360,13 +389,17 @@ export async function runStructuredResearch<T>({
     };
   };
   try {
-    payload = (await response.json()) as typeof payload;
+    // Scrub after decoding too: unicode-escaped provider strings must not
+    // restore a credential into source metadata, usage logs or report output.
+    payload = JSON.parse(
+      redactAISecrets(JSON.stringify(await response.json()), apiKey),
+    ) as typeof payload;
   } catch {
     await recordAIUsage({
       ...audit,
       model,
       status: 'invalid_output',
-      requestId: response.headers.get('x-request-id'),
+      requestId,
       errorCode: 'invalid_response_json',
     }).catch(() => undefined);
     throw new OpenAIResearchError(
@@ -394,21 +427,39 @@ export async function runStructuredResearch<T>({
   };
   let outputText = '';
   const sourceMap = new Map<string, string>();
+  const addSource = (source: { url?: string; title?: string }) => {
+    try {
+      if (!source.url) return;
+      const url = new URL(source.url);
+      if (
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.username ||
+        url.password
+      )
+        return;
+      if (
+        searchAllowedDomains &&
+        !searchAllowedDomains.some(
+          (domain) =>
+            url.hostname === domain || url.hostname.endsWith(`.${domain}`),
+        )
+      )
+        return;
+      sourceMap.set(url.href, source.title || url.hostname);
+    } catch {
+      /* Invalid external metadata must not break the answer or audit. */
+    }
+  };
 
   for (const item of payload.output ?? []) {
     for (const source of item.action?.sources ?? []) {
-      if (source.url)
-        sourceMap.set(source.url, source.title || new URL(source.url).hostname);
+      addSource(source);
     }
     for (const content of item.content ?? []) {
       if (content.type === 'output_text' && content.text)
         outputText += content.text;
       for (const annotation of content.annotations ?? []) {
-        if (annotation.url)
-          sourceMap.set(
-            annotation.url,
-            annotation.title || new URL(annotation.url).hostname,
-          );
+        addSource(annotation);
       }
     }
   }
@@ -422,7 +473,7 @@ export async function runStructuredResearch<T>({
       model,
       ...usageRecord,
       status: 'invalid_output',
-      requestId: response.headers.get('x-request-id'),
+      requestId,
       errorCode: payload.incomplete_details?.reason || 'incomplete',
     }).catch(() => undefined);
     throw new OpenAIResearchError(
@@ -439,7 +490,7 @@ export async function runStructuredResearch<T>({
       model,
       ...usageRecord,
       status: 'invalid_output',
-      requestId: response.headers.get('x-request-id'),
+      requestId,
       errorCode: 'missing_output_text',
     }).catch(() => undefined);
     throw new OpenAIResearchError(
@@ -452,14 +503,16 @@ export async function runStructuredResearch<T>({
 
   let data: T;
   try {
-    data = JSON.parse(outputText) as T;
+    data = JSON.parse(
+      redactAISecrets(JSON.stringify(JSON.parse(outputText)), apiKey),
+    ) as T;
   } catch {
     await recordAIUsage({
       ...audit,
       model,
       ...usageRecord,
       status: 'invalid_output',
-      requestId: response.headers.get('x-request-id'),
+      requestId,
       errorCode: payload.incomplete_details?.reason || 'invalid_output',
     }).catch(() => undefined);
     throw new OpenAIResearchError(
@@ -475,7 +528,7 @@ export async function runStructuredResearch<T>({
     model,
     ...usageRecord,
     status: 'succeeded',
-    requestId: response.headers.get('x-request-id'),
+    requestId,
   }).catch(() => undefined);
 
   console.info(
@@ -507,15 +560,9 @@ export async function runStructuredResearch<T>({
   };
 }
 
-export function checkOpenAIStatus(requestedModel?: unknown) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey)
-    throw new OpenAIResearchError(
-      'missing_key',
-      500,
-      '站点尚未配置 OPENAI_API_KEY。',
-      false,
-    );
-  const model = resolveAIModel(requestedModel || process.env.OPENAI_MODEL);
-  return { status: 'configured' as const, model };
+export async function checkOpenAIStatus(requestedModel?: unknown) {
+  const access = await requireResearchAccess();
+  const model = resolvePermittedAIModel(access, requestedModel);
+  const { billingSource } = await resolveUserAICredential(access.user);
+  return { status: 'configured' as const, model, billingSource };
 }

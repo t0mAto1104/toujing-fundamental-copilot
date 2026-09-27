@@ -5,6 +5,7 @@ import {
   getIndustryReportsSnapshot,
   INDUSTRY_REPORTS_CACHE_KEY,
   type IndustryReportsSnapshot,
+  getIndustryReportsPage,
 } from '@/lib/a-stock-reports';
 import { readDataSnapshot } from '@/lib/data-snapshot-cache';
 
@@ -25,6 +26,27 @@ function reportsResponse(
 
 export async function GET(request: Request) {
   try {
+    const params = new URL(request.url).searchParams;
+    if (params.has('page') || params.has('source')) {
+      const page = Number(params.get('page') ?? 1),
+        source = params.get('source') ?? 'eastmoney';
+      if (
+        !Number.isInteger(page) ||
+        page < 1 ||
+        page > 1000 ||
+        !['eastmoney', 'sina'].includes(source)
+      )
+        return Response.json({ error: '页码或来源无效' }, { status: 400 });
+      return Response.json(
+        await getIndustryReportsPage(
+          (params.get('query') ?? '').trim().slice(0, 100),
+          source as 'eastmoney' | 'sina',
+          page,
+          request.signal,
+        ),
+        { headers: { 'Cache-Control': 'private, no-store' } },
+      );
+    }
     const query = new URL(request.url).searchParams.get('query')?.trim() || '';
     if (query) {
       const snapshot = await getIndustryReportsForQuery(query);

@@ -284,6 +284,110 @@ void test('board flow selects correct period fields and preserves missing values
   );
 });
 
+void test('signal cache refreshes after 60 seconds; manual refresh respects 15-second shared floor', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 28, 2) });
+  let calls = 0;
+  const refresh = async () => {
+    calls++;
+    return { items: [{ mainNet: calls * 100 }] };
+  };
+  const get = (force = false) =>
+    signals.cachedMarketSignal(
+      'qa-board-refresh',
+      60_000,
+      'test',
+      'https://example.com',
+      refresh,
+      undefined,
+      1000,
+      force,
+    );
+  const first = await get();
+  assert.equal(first.data.items[0].mainNet, 100);
+  t.mock.timers.tick(10_000);
+  await get(true);
+  assert.equal(calls, 1);
+  t.mock.timers.tick(6_000);
+  const manual = await get(true);
+  assert.equal(manual.data.items[0].mainNet, 200);
+  assert.notEqual(first.fetchedAt, manual.fetchedAt);
+  t.mock.timers.tick(59_000);
+  await get();
+  assert.equal(calls, 2);
+  t.mock.timers.tick(2_000);
+  const polled = await get();
+  assert.equal(polled.data.items[0].mainNet, 300);
+});
+
+void test('manual signal refresh never bypasses provider failure cooldown', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 28, 3) });
+  let calls = 0;
+  const refresh = async () => {
+    calls++;
+    throw Error('test provider unavailable');
+  };
+  const snapshot = { items: [], total: 0, page: 1, pages: 0 };
+  await snapshots.storeDataSnapshot(
+    'signals:v1:qa-refresh-cooldown',
+    'market-signals',
+    snapshot,
+    60_000,
+    'test',
+    'https://example.com',
+  );
+  t.mock.timers.tick(16_000);
+  const first = await signals.cachedMarketSignal(
+    'qa-refresh-cooldown',
+    60_000,
+    'test',
+    'https://example.com',
+    refresh,
+    undefined,
+    1000,
+    true,
+  );
+  assert.equal(first.stale, true);
+  const second = await signals.cachedMarketSignal(
+    'qa-refresh-cooldown',
+    60_000,
+    'test',
+    'https://example.com',
+    refresh,
+    undefined,
+    1000,
+    true,
+  );
+  assert.equal(second.stale, true);
+  assert.equal(calls, 1);
+});
+
+void test('invalid board rows cannot supply the missing source timestamp of valid rows', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({
+      rc: 0,
+      data: {
+        total: 1,
+        diff: [
+          { f12: 'BK1002', f14: '测试行业', f62: 0 },
+          { f12: 'invalid', f124: Math.floor(Date.now() / 1000) },
+        ],
+      },
+    }),
+  );
+  const result = await signals.getBoardFlows('industry', '5d', 1);
+  assert.equal(result.data.items.length, 1);
+  assert.equal(result.data.date, undefined);
+  assert.equal(result.stale, true);
+  assert.match(result.notice!, /来源未提供/);
+  const stored = await snapshots.readDataSnapshot(
+    'signals:v1:boards:industry:5d:1',
+  );
+  assert.equal(
+    Date.parse(stored!.expiresAt) - Date.parse(stored!.fetchedAt),
+    60_000,
+  );
+});
+
 void test('datacenter no-record result is distinct from malformed / rejected data', () => {
   assert.deepEqual(
     signals.parseDatacenter({

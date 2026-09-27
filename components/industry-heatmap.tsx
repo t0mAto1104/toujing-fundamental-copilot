@@ -1,9 +1,11 @@
 'use client';
 
+/* oxlint-disable jsx-a11y/no-noninteractive-tabindex -- Named heatmap overflow region supports keyboard scrolling. */
+
 /* oxlint-disable next/no-html-link-for-pages -- retain reliable full navigation. */
 
 import { Database, Info, MousePointer2, RefreshCw, Search } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type IndustryItem = {
   code: string;
@@ -49,8 +51,8 @@ function money(value: number | null) {
 }
 
 function tileTone(percent: number) {
-  if (percent >= 5) return 'bg-red-600 text-white';
-  if (percent >= 3) return 'bg-red-500/90 text-white';
+  if (percent >= 5) return 'bg-red-600 text-white dark:bg-red-900/85';
+  if (percent >= 3) return 'bg-red-500/90 text-white dark:bg-red-900/70';
   if (percent >= 1)
     return 'bg-red-200 text-red-950 dark:bg-red-900/75 dark:text-red-50';
   if (percent > 0)
@@ -86,6 +88,7 @@ export function IndustryHeatmap() {
   const [activeCode, setActiveCode] = useState('');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const toolsRef = useRef<HTMLDetailsElement>(null);
 
   const load = async () => {
     setLoading(true);
@@ -138,24 +141,18 @@ export function IndustryHeatmap() {
     );
   }, [snapshot, query]);
   const active =
-    snapshot?.industries.find((industry) => industry.code === activeCode) ||
+    visibleIndustries.find((industry) => industry.code === activeCode) ||
     visibleIndustries[0] ||
     null;
 
   return (
-    <section className="saas-panel mt-5">
+    <section className="industry-heatmap saas-panel mt-5">
       <div className="saas-panel-header">
         <div>
           <p className="eyebrow">ALL A-SHARE INDUSTRIES</p>
-          <h2 className="mt-1 text-lg font-semibold">A股全行业细分热力图</h2>
+          <h2 className="mt-1 text-lg font-semibold">A股全行业热力图</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
-          <span className="inline-flex items-center gap-1">
-            <Database className="size-3" />
-            {snapshot?.provider || '正在连接行情源'}
-          </span>
-          <span>·</span>
-          <span>{displayTime(snapshot?.updatedAt)}</span>
           <button
             type="button"
             onClick={() => void load()}
@@ -168,96 +165,136 @@ export function IndustryHeatmap() {
         </div>
       </div>
 
-      <div className="p-3 sm:p-4">
-        <div className="mb-2.5 flex flex-col gap-2.5 lg:flex-row">
-          <div className="min-h-[82px] flex-1 rounded-lg border border-border bg-background p-3">
-            {active ? (
-              <div className="grid gap-2.5 sm:grid-cols-[1fr_auto]">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm font-semibold">{active.name}</h3>
-                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-                      {active.code}
-                    </span>
-                    <span
-                      className={`font-mono text-xs font-semibold ${active.percent >= 0 ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}
-                    >
-                      {signed(active.percent)}
-                    </span>
-                  </div>
-                  <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
-                    行业内 {active.riseCount} 家上涨、{active.fallCount}{' '}
-                    家下跌、{active.flatCount} 家平盘；
-                    {money(active.mainNetFlow)}
-                    。为实时行情事实，不替代财报与产业证据。
-                  </p>
-                  <a
-                    href={`/quotes?view=industry&board=${encodeURIComponent(active.code)}`}
-                    className="mt-2 inline-block text-sm text-primary"
-                  >
-                    查看行业股票排行 →
-                  </a>
-                </div>
-                <div className="min-w-40 rounded-md bg-muted/70 px-3 py-2">
-                  <p className="text-[9px] text-muted-foreground">
-                    当前领涨公司
-                  </p>
-                  <p className="mt-0.5 text-[11px] font-semibold">
-                    {active.leader?.name || '暂无可验证数据'}{' '}
-                    {active.leader?.code ? (
-                      <span className="font-mono text-[9px] text-muted-foreground">
-                        {active.leader.code}
+      <div className="heatmap-content p-3 sm:p-4">
+        <details className="heatmap-tools" ref={toolsRef}>
+          <summary>筛选与详情</summary>
+          <div className="heatmap-toolbar mb-2.5 flex flex-col gap-2.5 lg:flex-row">
+            <details className="heatmap-active rounded-lg border border-border bg-background p-3">
+              <summary className="cursor-pointer text-xs">
+                {active ? (
+                  <>
+                    <span className="flex flex-wrap items-center gap-2">
+                      <strong>{active.name}</strong>
+                      <span
+                        className={`font-mono ${active.percent >= 0 ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}
+                      >
+                        {signed(active.percent)}
                       </span>
-                    ) : null}
-                  </p>
-                  <div className="mt-1 flex items-end justify-between gap-3">
-                    <span className="font-mono text-sm font-semibold">
-                      {active.leader?.price !== null &&
-                      active.leader?.price !== undefined
-                        ? `¥ ${active.leader.price.toFixed(2)}`
-                        : '价格暂无'}
+                      <span className="ml-auto">
+                        {active.leader?.name || '暂无领涨公司'}{' '}
+                        {active.leader?.price != null
+                          ? `¥ ${active.leader.price.toFixed(2)}`
+                          : '价格暂无'}
+                      </span>
                     </span>
-                    <span
-                      className={`font-mono text-[10px] ${Number(active.leader?.percent) >= 0 ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}
+                    <span className="mt-1 block text-muted-foreground">
+                      上涨 {active.riseCount} 家 · 下跌 {active.fallCount} 家 ·{' '}
+                      {money(active.mainNetFlow)} · 展开详情
+                    </span>
+                  </>
+                ) : loading ? (
+                  '正在获取行业行情…'
+                ) : (
+                  snapshot?.error || '暂无可验证数据'
+                )}
+              </summary>
+              {active ? (
+                <div className="grid gap-2.5 sm:grid-cols-[1fr_auto]">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-semibold">{active.name}</h3>
+                      <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                        {active.code}
+                      </span>
+                      <span
+                        className={`font-mono text-xs font-semibold ${active.percent >= 0 ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}
+                      >
+                        {signed(active.percent)}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+                      行业内 {active.riseCount} 家上涨、{active.fallCount}{' '}
+                      家下跌、{active.flatCount} 家平盘；
+                      {money(active.mainNetFlow)}
+                      。为实时行情事实，不替代财报与产业证据。
+                    </p>
+                    <a
+                      href={`/quotes?view=industry&board=${encodeURIComponent(active.code)}`}
+                      className="mt-2 inline-block text-sm text-primary"
                     >
-                      {signed(active.leader?.percent ?? null)}
-                    </span>
+                      查看行业股票排行 →
+                    </a>
+                  </div>
+                  <div className="min-w-40 rounded-md bg-muted/70 px-3 py-2">
+                    <p className="text-[9px] text-muted-foreground">
+                      当前领涨公司
+                    </p>
+                    <p className="mt-0.5 text-[11px] font-semibold">
+                      {active.leader?.name || '暂无可验证数据'}{' '}
+                      {active.leader?.code ? (
+                        <span className="font-mono text-[9px] text-muted-foreground">
+                          {active.leader.code}
+                        </span>
+                      ) : null}
+                    </p>
+                    <div className="mt-1 flex items-end justify-between gap-3">
+                      <span className="font-mono text-sm font-semibold">
+                        {active.leader?.price !== null &&
+                        active.leader?.price !== undefined
+                          ? `¥ ${active.leader.price.toFixed(2)}`
+                          : '价格暂无'}
+                      </span>
+                      <span
+                        className={`font-mono text-[10px] ${Number(active.leader?.percent) >= 0 ? 'text-red-600 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}
+                      >
+                        {signed(active.leader?.percent ?? null)}
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ) : (
-              <div className="flex min-h-20 items-center justify-center text-xs text-muted-foreground">
-                {loading
-                  ? '正在获取全部行业细分实时数据…'
-                  : snapshot?.error || '暂无可验证的行业行情数据。'}
-              </div>
-            )}
+              ) : (
+                <div className="flex min-h-20 items-center justify-center text-xs text-muted-foreground">
+                  {loading
+                    ? '正在获取全部行业细分实时数据…'
+                    : snapshot?.error || '暂无可验证的行业行情数据。'}
+                </div>
+              )}
+            </details>
+            <label className="relative lg:w-56">
+              <span className="sr-only">搜索行业或公司</span>
+              <Search className="absolute left-3 top-2.5 size-3.5 text-muted-foreground" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索行业或领涨公司"
+                className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-xs outline-none focus:ring-2 focus:ring-ring/40"
+              />
+              <span className="mt-1.5 block text-[9px] text-muted-foreground">
+                显示 {visibleIndustries.length} / {snapshot?.sourceTotal || 0}{' '}
+                个行业细分
+              </span>
+            </label>
           </div>
-          <label className="relative lg:w-56">
-            <span className="sr-only">搜索行业或公司</span>
-            <Search className="absolute left-3 top-2.5 size-3.5 text-muted-foreground" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索行业或领涨公司"
-              className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-xs outline-none focus:ring-2 focus:ring-ring/40"
-            />
-            <span className="mt-1.5 block text-[9px] text-muted-foreground">
-              显示 {visibleIndustries.length} / {snapshot?.sourceTotal || 0}{' '}
-              个行业细分
-            </span>
-          </label>
-        </div>
+        </details>
 
         {visibleIndustries.length ? (
-          <div className="grid max-h-[430px] grid-flow-dense auto-rows-[44px] grid-cols-3 gap-1 overflow-y-auto pr-1 sm:grid-cols-5 lg:grid-cols-9 2xl:grid-cols-11 [scrollbar-width:thin]">
+          <section
+            className="heatmap-tiles grid max-h-[430px] grid-flow-dense auto-rows-[44px] grid-cols-3 gap-1 overflow-y-auto pr-1 sm:grid-cols-5 lg:grid-cols-9 2xl:grid-cols-11 [scrollbar-width:thin]"
+            tabIndex={0}
+            aria-label="全部行业热力图，可滚动查看"
+          >
             {visibleIndustries.map((industry) => (
               <button
                 key={industry.code}
                 type="button"
                 onMouseEnter={() => setActiveCode(industry.code)}
                 onFocus={() => setActiveCode(industry.code)}
-                onClick={() => setActiveCode(industry.code)}
+                onClick={() => {
+                  setActiveCode(industry.code);
+                  if (toolsRef.current) toolsRef.current.open = true;
+                }}
+                aria-pressed={industry.code === activeCode}
+                aria-label={`${industry.name}，${signed(industry.percent)}，点击查看行情详情`}
                 className={`overflow-hidden rounded-md px-2 py-1.5 text-left outline-none ring-primary/60 transition-transform hover:z-10 hover:-translate-y-0.5 focus-visible:ring-2 ${tileTone(industry.percent)} ${tileSize(industry.rank)}`}
               >
                 <span
@@ -277,20 +314,47 @@ export function IndustryHeatmap() {
                 ) : null}
               </button>
             ))}
-          </div>
+          </section>
         ) : snapshot?.error ? (
           <div className="rounded-xl border border-dashed border-border py-12 text-center text-xs text-muted-foreground">
             {snapshot.error} 未展示任何模拟数据。
           </div>
         ) : null}
+        {active && (
+          <output className="heatmap-hover" aria-live="off">
+            <strong>
+              {active.name} {signed(active.percent)}
+            </strong>
+            <span>
+              {active.leader?.name || '暂无领涨公司'} ·{' '}
+              {active.leader?.price != null
+                ? `¥ ${active.leader.price.toFixed(2)}`
+                : '价格暂无'}
+            </span>
+            <span>
+              上涨 {active.riseCount} 家 / 下跌 {active.fallCount} 家 ·{' '}
+              {money(active.mainNetFlow)}
+            </span>
+            <span>行情事实 · 点击查看详情与行业排行</span>
+          </output>
+        )}
       </div>
-      <p className="flex items-start gap-1.5 border-t border-border px-4 py-3 text-[9px] leading-4 text-muted-foreground">
-        <Info className="mt-0.5 size-3 shrink-0" />
-        面积按当日行业强弱排名递减；红涨绿跌。
-        <MousePointer2 className="mt-0.5 size-3 shrink-0" />
-        悬停、聚焦或点击可查看领涨公司实时价格与行情事实。
-        {snapshot?.methodology}
-      </p>
+      <details className="heatmap-methodology border-t border-border px-4 py-3 text-[9px] leading-4 text-muted-foreground">
+        <summary className="cursor-pointer">
+          红涨绿跌 · 面积按强弱排序 · 数据来源与说明
+        </summary>
+        <p className="mt-2">
+          <Database className="size-3" />{' '}
+          {snapshot?.provider || '正在连接行情源'} ·{' '}
+          {displayTime(snapshot?.updatedAt)} · 显示 {visibleIndustries.length} /{' '}
+          {snapshot?.sourceTotal || 0} 个行业细分。
+          <Info className="mt-0.5 size-3 shrink-0" />
+          面积按当日行业强弱排名递减；红涨绿跌。
+          <MousePointer2 className="mt-0.5 size-3 shrink-0" />
+          悬停、聚焦或点击可查看领涨公司实时价格与行情事实。
+          {snapshot?.methodology}
+        </p>
+      </details>
     </section>
   );
 }

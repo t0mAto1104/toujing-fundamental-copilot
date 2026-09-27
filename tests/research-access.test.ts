@@ -78,6 +78,8 @@ sqlite.exec(readFileSync('drizzle/0004_ai_usage_cost_details.sql', 'utf8'));
 sqlite.exec(readFileSync('drizzle/0003_market_watchlist.sql', 'utf8'));
 sqlite.exec(readFileSync('drizzle/0005_research_workbench.sql', 'utf8'));
 sqlite.exec(readFileSync('drizzle/0006_research_task_identity.sql', 'utf8'));
+sqlite.exec(readFileSync('drizzle/0007_personal_ai_credentials.sql', 'utf8'));
+sqlite.exec(readFileSync('drizzle/0008_user_model_preferences.sql', 'utf8'));
 const request = (path: string, body?: unknown) =>
   new Request(
     `https://qa.invalid${path}`,
@@ -85,7 +87,10 @@ const request = (path: string, body?: unknown) =>
       ? undefined
       : {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://qa.invalid',
+          },
           body: JSON.stringify(body),
         },
   );
@@ -107,6 +112,7 @@ void test('all paid AI routes reject anonymous users without any network request
     await import('../app/api/chat/route'),
     await import('../app/api/followup/route'),
     await import('../app/api/compare/route'),
+    await import('../app/api/industry-research/route'),
     await import('../app/api/brief/route'),
   ])
     assert.equal(
@@ -164,7 +170,7 @@ void test('saved full reports open directly, preserve old fields and stay user-i
   assert.equal(networkCalls, 0);
 });
 
-void test('quota, pause and model restrictions remain enforced in actual SQL', async () => {
+void test('daily caps are removed while usage, pause and model restrictions remain enforced', async () => {
   login('limited-user');
   let context = await access.requireResearchAccess();
   sqlite
@@ -189,18 +195,25 @@ void test('quota, pause and model restrictions remain enforced in actual SQL', a
     () => access.resolvePermittedAIModel(context, 'gpt-5.6-sol'),
     /不能使用/,
   );
-  await access.consumeDailyResearchQuota(context);
-  await assert.rejects(access.consumeDailyResearchQuota(context), /达到上限/);
+  await access.recordResearchUsage(context);
+  await access.recordResearchUsage(context);
+  assert.equal(
+    sqlite
+      .prepare('SELECT daily_research_used AS n FROM users WHERE id=?')
+      .get('limited-user')?.n,
+    2,
+  );
   sqlite
     .prepare('UPDATE users SET research_enabled=0 WHERE id=?')
     .run('limited-user');
   await assert.rejects(access.requireResearchAccess(), /暂停/);
+  await assert.rejects(access.recordResearchUsage(context), /暂停/);
   sqlite
     .prepare(
       'UPDATE users SET research_enabled=1, daily_research_limit=2 WHERE id=?',
     )
     .run('limited-user');
-  await access.consumeDailyResearchQuota(await access.requireResearchAccess());
+  await access.recordResearchUsage(await access.requireResearchAccess());
   assert.equal(networkCalls, 0);
 });
 

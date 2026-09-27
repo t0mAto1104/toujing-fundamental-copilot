@@ -378,8 +378,12 @@ export async function getInvestorQuestions(
   const symbol = stockSignalSymbol(input),
     today = chinaDate(),
     start = shiftDate(today, -(days - 1));
+  if (symbol.startsWith('sh')) {
+    const { getSseQuestions } = await import('@/lib/a-stock-sse-interaction');
+    return getSseQuestions(symbol, days, page, signal);
+  }
   if (!symbol.startsWith('sz'))
-    throw new Error('互动易仅覆盖深市公司；沪市及北交所暂不提供此来源的问答。');
+    throw new Error('互动问答覆盖沪深公司，北交所暂不支持。');
   return cached(
     `questions:${symbol}:${days}:${today}:${page}`,
     '深交所互动易',

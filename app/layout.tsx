@@ -4,6 +4,7 @@ import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { MarketAgentChat } from '@/components/market-agent-chat';
 import { WorkspaceSessionProvider } from '@/components/workspace-session';
 import { TradingSessionProvider } from '@/components/trading-session';
+import { NotebookProvider } from '@/components/notebook-window';
 import { getUserAIModelPolicy, isSiteAdminUser } from '@/lib/site-users';
 import './globals.css';
 
@@ -66,11 +67,14 @@ export default async function RootLayout({
     : null;
   const user = authenticatedUser
     ? {
+        id: authenticatedUser.userId,
         name: authenticatedUser.displayName,
         email: authenticatedUser.email,
         isAdmin: isSiteAdminUser(authenticatedUser),
         allowedAIModels: modelPolicy?.allowedAIModels,
         modelPolicyUnavailable: modelPolicy?.modelPolicyUnavailable,
+        preferredChatModel: modelPolicy?.preferredChatModel,
+        preferredResearchModel: modelPolicy?.preferredResearchModel,
       }
     : null;
   return (
@@ -87,8 +91,10 @@ export default async function RootLayout({
       >
         <WorkspaceSessionProvider user={user}>
           <TradingSessionProvider>
-            {children}
-            <MarketAgentChat context="透镜基本面分析工作台的当前页面" />
+            <NotebookProvider owner={user?.id || ''}>
+              {children}
+              <MarketAgentChat />
+            </NotebookProvider>
           </TradingSessionProvider>
         </WorkspaceSessionProvider>
       </body>

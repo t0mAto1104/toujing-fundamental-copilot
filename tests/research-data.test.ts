@@ -17,7 +17,37 @@ import {
 } from '../lib/research-financials';
 import { readResearchResponse } from '../lib/research-stream';
 import { parseCompanyValuation } from '../lib/a-stock-company';
-import { cashRestrictionTable } from '../lib/research-pdf-tables';
+import {
+  cashRestrictionTable,
+  researchPdfText,
+} from '../lib/research-pdf-tables';
+
+void test('wrapped PDF amounts join only at matching right edges and valid thousands groups', () => {
+  const item = (str: string, x: number, y: number, width: number) => ({
+    str,
+    transform: [1, 0, 0, 1, x, y],
+    width,
+  });
+  assert.equal(
+    researchPdfText([
+      item('12,870,867,6', 161.04, 599.57, 55.02),
+      item('62.16', 192.6, 587.57, 23.46),
+    ]),
+    '12,870,867,662.16',
+  );
+  assert.equal(
+    researchPdfText([item('1,234.', 100, 120, 50), item('56', 135, 108, 15)]),
+    '1,234.56',
+  );
+  assert.equal(
+    researchPdfText([item('12.3', 100, 120, 40), item('45.67', 160, 120, 40)]),
+    '12.3 45.67',
+  );
+  assert.equal(
+    researchPdfText([item('1,234.', 100, 120, 50), item('56', 200, 108, 15)]),
+    '1,234. 56',
+  );
+});
 
 void test('Sina mirror pages share disclosure identity without inventing URLs', () => {
   assert.equal(

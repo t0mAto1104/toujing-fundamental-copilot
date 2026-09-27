@@ -4,6 +4,7 @@ import { WalletCards } from 'lucide-react';
 import { WorkspaceShell } from '@/components/workspace-shell';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { DragonBoard, Northbound, Unlocks } from '@/components/market-signals';
+import { CompanyEvents } from '@/components/market-extensions';
 
 export default function SignalsPage() {
   return (
@@ -29,6 +30,7 @@ export default function SignalsPage() {
             <Unlocks />
           </TabsContent>
         </Tabs>
+        <CompanyEvents />
       </div>
     </WorkspaceShell>
   );

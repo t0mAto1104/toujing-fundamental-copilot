@@ -1,15 +1,19 @@
 import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { resolveUserAICredential } from '@/lib/ai-credentials';
+import { readAIRequestJSON } from '@/lib/ai-request-security';
 import {
   requireResearchAccess,
   resolvePermittedAIModel,
 } from '@/lib/site-users';
-import { defaultResearchModel } from '@/lib/ai-models';
 import { searchListedSecurities } from '@/lib/market-listings';
+import { validateResearchTemplate } from '@/lib/report-template';
 import {
   BATCH_LIMIT,
   createResearchBatch,
   getResearchTask,
   serializeTask,
+  taskProgressView,
+  TASK_CANCEL_GRACE_MS,
   taskDatabase,
   taskUsage,
   unsettledReservations,
@@ -22,8 +26,30 @@ export async function GET(request: Request) {
   if (!user)
     return Response.json({ error: '请先登录。' }, { status: 401, headers });
   try {
-    const id = new URL(request.url).searchParams.get('id');
+    const params = new URL(request.url).searchParams;
+    const id = params.get('id');
     if (id) {
+      if (params.get('progress') === '1') {
+        // One owner-scoped status read; no report body, usage aggregation or AI.
+        const task = await taskDatabase()
+          .prepare(`SELECT id, status, stage, message, updated_at, lease_expires_at
+            FROM research_tasks WHERE user_id = ? AND id = ?`)
+          .bind(user.userId, id)
+          .first<
+            Pick<
+              TaskRow,
+              | 'id'
+              | 'status'
+              | 'stage'
+              | 'message'
+              | 'updated_at'
+              | 'lease_expires_at'
+            >
+          >();
+        return task
+          ? Response.json({ task: taskProgressView(task) }, { headers })
+          : Response.json({ error: '任务不存在。' }, { status: 404, headers });
+      }
       const row = await getResearchTask(user.userId, id);
       if (!row)
         return Response.json(
@@ -41,7 +67,7 @@ export async function GET(request: Request) {
       );
     }
     const rows = await taskDatabase()
-      .prepare(`SELECT id, user_id, batch_id, query, listing_json, model, framework_version, pipeline_version,
+      .prepare(`SELECT id, user_id, batch_id, query, listing_json, template_json, model, framework_version, pipeline_version,
       status, stage, message, error, token_limit, usd_limit, committed_tokens, committed_usd,
       lease_id, lease_expires_at, quota_consumed, completed_stages_json, created_at, updated_at,
       CASE WHEN report_json IS NULL THEN NULL ELSE '{}' END AS report_json
@@ -69,18 +95,12 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const access = await requireResearchAccess();
-    if (
-      request.headers.get('origin') &&
-      request.headers.get('origin') !== new URL(request.url).origin
-    )
-      return Response.json(
-        { error: '不允许跨站创建任务。' },
-        { status: 403, headers },
-      );
-    const raw = await request.text();
-    if (raw.length > 6000)
-      return Response.json({ error: '请求过长。' }, { status: 413, headers });
-    const body = JSON.parse(raw);
+    const body = await readAIRequestJSON(request, 96_000);
+    const reportTemplate =
+      body.reportTemplate === undefined
+        ? undefined
+        : validateResearchTemplate(body.reportTemplate);
+    await resolveUserAICredential(access.user);
     if (
       !Array.isArray(body.items) ||
       !body.items.length ||
@@ -93,7 +113,7 @@ export async function POST(request: Request) {
       );
     const model = resolvePermittedAIModel(
       access,
-      body.model ?? defaultResearchModel(access.allowedAIModels),
+      body.model ?? access.preferredResearchModel,
     );
     const verified = await Promise.all(
       body.items.map(async (item: { query?: unknown; listingId?: unknown }) => {
@@ -125,6 +145,7 @@ export async function POST(request: Request) {
           batchId,
           tokenLimit: body.tokenLimit,
           usdLimit: body.usdLimit,
+          reportTemplate,
         })),
       )
     ).map(serializeTask);
@@ -160,20 +181,17 @@ export async function PATCH(request: Request) {
     if (!row)
       return Response.json({ error: '任务不存在。' }, { status: 404, headers });
     if (body.action === 'cancel') {
+      const now = new Date().toISOString();
+      const cancelBy = new Date(
+        Date.now() + TASK_CANCEL_GRACE_MS,
+      ).toISOString();
       await taskDatabase()
         .prepare(`UPDATE research_tasks SET status = CASE WHEN lease_expires_at > ? THEN 'cancelling' ELSE 'cancelled' END,
         lease_id = CASE WHEN lease_expires_at > ? THEN lease_id ELSE NULL END,
-        lease_expires_at = CASE WHEN lease_expires_at > ? THEN lease_expires_at ELSE NULL END,
+        lease_expires_at = CASE WHEN lease_expires_at > ? THEN MIN(lease_expires_at, ?) ELSE NULL END,
         message = '停止后续研究；已发出的请求可能已经计费', updated_at = ?
         WHERE user_id = ? AND id = ? AND status <> 'completed'`)
-        .bind(
-          new Date().toISOString(),
-          new Date().toISOString(),
-          new Date().toISOString(),
-          new Date().toISOString(),
-          user.userId,
-          row.id,
-        )
+        .bind(now, now, now, cancelBy, now, user.userId, row.id)
         .run();
     } else if (body.action === 'budget') {
       const access = await requireResearchAccess();

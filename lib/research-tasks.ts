@@ -5,6 +5,7 @@ import { RESEARCH_PIPELINE_VERSION } from '@/lib/research-checkpoints';
 import type { ListingOption } from '@/lib/market-listings';
 import type { CompanyReport } from '@/lib/research-types';
 import type { ResearchContext } from '@/lib/site-users';
+import { validateResearchTemplate, type Draft } from '@/lib/report-template';
 
 export class ResearchTaskError extends Error {
   constructor(
@@ -15,7 +16,10 @@ export class ResearchTaskError extends Error {
     super(message);
   }
 }
-export const TASK_LEASE_MS = 10 * 60_000;
+// Runtime budget and liveness are different: a killed Worker cannot run finally.
+export const TASK_RUNTIME_MS = 10 * 60_000;
+export const TASK_LEASE_MS = 60_000;
+export const TASK_CANCEL_GRACE_MS = 15_000;
 export const BATCH_LIMIT = 3;
 export type TaskRow = {
   id: string;
@@ -23,6 +27,7 @@ export type TaskRow = {
   batch_id: string | null;
   query: string;
   listing_json: string;
+  template_json: string | null;
   model: string;
   framework_version: string;
   pipeline_version: string;
@@ -53,24 +58,42 @@ export async function getResearchTask(userId: string, id: string) {
     .bind(userId, id)
     .first<TaskRow>();
 }
-export function serializeTask(row: TaskRow) {
+export function taskProgressView(
+  row: Pick<
+    TaskRow,
+    'id' | 'status' | 'stage' | 'message' | 'updated_at' | 'lease_expires_at'
+  >,
+) {
+  const expired =
+    ['running', 'cancelling'].includes(row.status) &&
+    (!row.lease_expires_at || row.lease_expires_at <= new Date().toISOString());
   return {
     id: row.id,
+    status: expired
+      ? row.status === 'cancelling'
+        ? 'cancelled'
+        : 'interrupted'
+      : row.status,
+    stage: row.stage,
+    message: expired
+      ? row.status === 'cancelling'
+        ? '任务已停止；已发出的请求可能已经计费。'
+        : '研究连接已中断，名额已释放；已保存阶段保留，仅手动操作可继续。'
+      : row.message,
+    updatedAt: row.updated_at,
+  };
+}
+export function serializeTask(row: TaskRow) {
+  return {
+    ...taskProgressView(row),
     batchId: row.batch_id,
     query: row.query,
     listing: JSON.parse(row.listing_json) as ListingOption,
+    reportTemplate: row.template_json
+      ? (JSON.parse(row.template_json) as Draft)
+      : null,
     model: row.model,
     frameworkVersion: row.framework_version,
-    status:
-      row.lease_expires_at &&
-      row.lease_expires_at < new Date().toISOString() &&
-      ['running', 'cancelling'].includes(row.status)
-        ? row.status === 'cancelling'
-          ? 'cancelled'
-          : 'interrupted'
-        : row.status,
-    stage: row.stage,
-    message: row.message,
     error: row.error,
     tokenLimit: row.token_limit,
     usdLimit: row.usd_limit,
@@ -78,7 +101,6 @@ export function serializeTask(row: TaskRow) {
     committedUsd: row.committed_usd,
     completedStages: JSON.parse(row.completed_stages_json) as string[],
     createdAt: row.created_at,
-    updatedAt: row.updated_at,
     hasReport: Boolean(row.report_json),
   };
 }
@@ -91,6 +113,7 @@ type TaskInput = {
   batchId?: string;
   tokenLimit?: number;
   usdLimit?: number;
+  reportTemplate?: Draft;
 };
 export async function createResearchTask(
   access: ResearchContext,
@@ -126,14 +149,23 @@ export async function createResearchBatch(
         '预算须为正数，且不能超过管理员设置的单报告上限。',
         400,
       );
-    return { ...input, tokens, usd, id: crypto.randomUUID() };
+    return {
+      ...input,
+      reportTemplate:
+        input.reportTemplate === undefined
+          ? undefined
+          : validateResearchTemplate(input.reportTemplate),
+      tokens,
+      usd,
+      id: crypto.randomUUID(),
+    };
   });
   const now = new Date().toISOString();
   const statements = rows.map((input, index) =>
     access.database
       .prepare(`INSERT INTO research_tasks
-    (id, user_id, batch_id, query, listing_json, model, framework_version, pipeline_version, token_limit, usd_limit, created_at, updated_at)
-    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    (id, user_id, batch_id, query, listing_json, template_json, model, framework_version, pipeline_version, token_limit, usd_limit, created_at, updated_at)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     WHERE ${index === 0 ? `(SELECT COUNT(*) FROM research_tasks WHERE user_id = ? AND status = 'queued') <= ?` : 'EXISTS (SELECT 1 FROM research_tasks WHERE id = ? AND user_id = ?)'} `)
       .bind(
         input.id,
@@ -141,6 +173,7 @@ export async function createResearchBatch(
         input.batchId || null,
         input.query,
         JSON.stringify(input.listing),
+        input.reportTemplate ? JSON.stringify(input.reportTemplate) : null,
         input.model,
         RESEARCH_FRAMEWORK_VERSION,
         RESEARCH_PIPELINE_VERSION,
@@ -173,7 +206,7 @@ export async function claimResearchTask(userId: string, id: string) {
     .prepare(`UPDATE research_tasks SET status = 'running', error = NULL,
     lease_id = ?, lease_expires_at = ?, updated_at = ?
     WHERE id = ? AND user_id = ? AND status NOT IN ('completed','cancelled','cancelling')
-    AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+    AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
     AND (SELECT COUNT(*) FROM research_tasks WHERE user_id = ? AND lease_expires_at > ?) = 0
     AND (SELECT COUNT(*) FROM research_tasks WHERE lease_expires_at > ?) < 2`)
     .bind(
@@ -188,11 +221,68 @@ export async function claimResearchTask(userId: string, id: string) {
       now,
     )
     .run();
-  if (!result.meta.changes)
+  if (!result.meta.changes) {
+    const row = await getResearchTask(userId, id);
+    if (!row)
+      throw new ResearchTaskError('任务不存在。', 404, 'task_not_found');
+    const status = taskProgressView(row).status;
+    if (status === 'completed' || status === 'cancelled')
+      throw new ResearchTaskError(
+        status === 'completed'
+          ? '任务已完成，请直接打开已保存报告。'
+          : '该任务已取消，请创建新研究。',
+        409,
+        `task_${status}`,
+      );
+    const active = await db
+      .prepare(`SELECT status, lease_expires_at FROM research_tasks
+      WHERE user_id = ? AND lease_expires_at > ? LIMIT 1`)
+      .bind(userId, now)
+      .first<{ status: string; lease_expires_at: string }>();
+    if (active) {
+      const seconds = Math.max(
+        1,
+        Math.ceil((Date.parse(active.lease_expires_at) - Date.now()) / 1000),
+      );
+      throw new ResearchTaskError(
+        active.status === 'cancelling'
+          ? `上一项研究正在停止，名额最迟约 ${seconds} 秒后释放；请稍后手动启动。`
+          : `当前账户已有研究正在运行，请查看该任务；如连接已中断，名额将在约 ${seconds} 秒内释放。`,
+        409,
+        active.status === 'cancelling' ? 'task_stopping' : 'user_task_running',
+      );
+    }
     throw new ResearchTaskError(
-      '任务已在运行、已取消或全站并发已满；请稍后手动启动。',
+      '当前全站研究并发名额已满，请稍后手动启动。',
+      409,
+      'site_task_capacity',
     );
+  }
   return leaseId;
+}
+
+// An expired or cancelled lease is never renewed. The token fences late workers
+// out of progress, report persistence and every subsequent paid-call reservation.
+export async function renewResearchTaskLease(
+  userId: string,
+  id: string,
+  leaseId: string,
+  deadline: number,
+) {
+  const now = Date.now();
+  if (now >= deadline) return false;
+  const result = await taskDatabase()
+    .prepare(`UPDATE research_tasks SET lease_expires_at = ?
+    WHERE user_id = ? AND id = ? AND lease_id = ? AND status = 'running' AND lease_expires_at > ?`)
+    .bind(
+      new Date(Math.min(now + TASK_LEASE_MS, deadline)).toISOString(),
+      userId,
+      id,
+      leaseId,
+      new Date(now).toISOString(),
+    )
+    .run();
+  return result.meta.changes === 1;
 }
 
 export async function updateTaskProgress(
@@ -204,24 +294,33 @@ export async function updateTaskProgress(
   completedStage?: string,
 ) {
   const db = taskDatabase();
-  await db
+  const updatedAt = new Date().toISOString();
+  const result = await db
     .prepare(`UPDATE research_tasks SET stage = ?, message = ?, updated_at = ?,
     completed_stages_json = CASE WHEN ? IS NOT NULL AND NOT EXISTS
       (SELECT 1 FROM json_each(completed_stages_json) WHERE value = ?)
       THEN json_insert(completed_stages_json, '$[#]', ?) ELSE completed_stages_json END
-    WHERE user_id = ? AND id = ? AND lease_id = ? AND status = 'running'`)
+    WHERE user_id = ? AND id = ? AND lease_id = ? AND status = 'running' AND lease_expires_at > ?`)
     .bind(
       stage,
       message,
-      new Date().toISOString(),
+      updatedAt,
       completedStage || null,
       completedStage || null,
       completedStage || null,
       userId,
       id,
       leaseId,
+      updatedAt,
     )
     .run();
+  if (!result.meta.changes)
+    throw new ResearchTaskError(
+      '任务已停止或连接已失效；没有启动后续研究。',
+      409,
+      'task_lease_lost',
+    );
+  return updatedAt;
 }
 
 export async function finishResearchTask(
@@ -238,7 +337,8 @@ export async function finishResearchTask(
     status = CASE WHEN status = 'cancelling' AND ? <> 'completed' THEN 'cancelled' ELSE ? END,
     message = ?, error = ?, report_json = COALESCE(?, report_json),
     lease_id = NULL, lease_expires_at = NULL, updated_at = ?
-    WHERE user_id = ? AND id = ? AND lease_id = ? AND status IN ('running','cancelling') AND lease_expires_at > ?`)
+    WHERE user_id = ? AND id = ? AND lease_id = ? AND status IN ('running','cancelling')
+      AND (? <> 'completed' OR (status = 'running' AND lease_expires_at > ?))`)
     .bind(
       status,
       status,
@@ -249,6 +349,7 @@ export async function finishResearchTask(
       userId,
       id,
       leaseId,
+      status,
       new Date().toISOString(),
     );
   const result = report

@@ -12,12 +12,15 @@ export async function GET(request: Request) {
       access,
       new URL(request.url).searchParams.get('model'),
     );
-    const result = checkOpenAIStatus(model);
-    return Response.json({
-      ...result,
-      checkedAt: new Date().toISOString(),
-      message: 'AI 研究服务已配置；状态检查未调用模型，不消耗 Token。',
-    });
+    const result = await checkOpenAIStatus(model);
+    return Response.json(
+      {
+        ...result,
+        checkedAt: new Date().toISOString(),
+        message: 'AI 研究服务已配置；状态检查未调用模型，不消耗 Token。',
+      },
+      { headers: { 'Cache-Control': 'private, no-store' } },
+    );
   } catch (error) {
     if (error instanceof ResearchAccessError)
       return Response.json(

@@ -1,4 +1,6 @@
 import { OpenAIResearchError, runStructuredResearch } from '@/lib/openai';
+import { resolveUserAICredential } from '@/lib/ai-credentials';
+import { readAIRequestJSON } from '@/lib/ai-request-security';
 import { normalizeSources, stripUrls } from '@/lib/ai-output';
 import {
   findIndustryEvidence,
@@ -6,7 +8,7 @@ import {
 } from '@/lib/a-stock-industries';
 import {
   assertResearchAccess,
-  consumeDailyResearchQuota,
+  recordResearchUsage,
   ResearchAccessError,
   resolvePermittedAIModel,
 } from '@/lib/site-users';
@@ -43,11 +45,12 @@ const comparisonSchema = {
 export async function POST(request: Request) {
   try {
     const access = await assertResearchAccess();
-    const body = (await request.json()) as {
+    const body = (await readAIRequestJSON(request)) as {
       left?: string;
       right?: string;
       model?: string;
     };
+    await resolveUserAICredential(access.user);
     if (!body.left || !body.right || body.left === body.right)
       return Response.json(
         { error: '请选择两个不同的行业。' },
@@ -69,7 +72,7 @@ export async function POST(request: Request) {
       note: '涨跌与资金流只用于描述当前资金行为，不代表行业内在价值或未来走势。',
     });
 
-    await consumeDailyResearchQuota(access);
+    await recordResearchUsage(access);
     const result = await runStructuredResearch<{
       updatedAt: string;
       summary: string;
@@ -134,7 +137,7 @@ export async function POST(request: Request) {
     const known = error instanceof OpenAIResearchError ? error : null;
     return Response.json(
       {
-        error: error instanceof Error ? error.message : '行业比较暂不可用',
+        error: known?.message || '行业比较暂不可用',
         code: known?.kind || 'api_error',
       },
       { status: known?.status || 500 },

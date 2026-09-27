@@ -1,4 +1,7 @@
 import { OpenAIResearchError } from '@/lib/openai';
+import { resolveUserAICredential } from '@/lib/ai-credentials';
+import { readAIRequestJSON } from '@/lib/ai-request-security';
+import { validateResearchTemplate } from '@/lib/report-template';
 import { RESEARCH_FRAMEWORK_VERSION } from '@/lib/research-framework';
 import { RESEARCH_PIPELINE_VERSION } from '@/lib/research-checkpoints';
 import {
@@ -9,10 +12,10 @@ import {
   searchListedSecurities,
   type ListingOption,
 } from '@/lib/market-listings';
-import { defaultResearchModel } from '@/lib/ai-models';
 import {
   requireResearchAccess,
-  consumeDailyResearchQuota,
+  bindResearchIdentity,
+  recordResearchUsage,
   resolvePermittedAIModel,
   ResearchAccessError,
 } from '@/lib/site-users';
@@ -23,7 +26,8 @@ import {
   getResearchTask,
   ResearchTaskError,
   updateTaskProgress,
-  TASK_LEASE_MS,
+  renewResearchTaskLease,
+  TASK_RUNTIME_MS,
 } from '@/lib/research-tasks';
 
 function errorPayload(error: unknown) {
@@ -36,7 +40,7 @@ function errorPayload(error: unknown) {
   return {
     status: known?.status || 500,
     body: {
-      error: error instanceof Error ? error.message : '研究服务暂不可用。',
+      error: known?.message || '研究服务暂不可用。',
       code:
         error instanceof ResearchTaskError ||
         error instanceof ResearchAccessError
@@ -44,20 +48,30 @@ function errorPayload(error: unknown) {
           : error instanceof OpenAIResearchError
             ? error.kind
             : 'api_error',
-      retryable: true,
+      retryable:
+        error instanceof OpenAIResearchError ||
+        error instanceof ResearchAccessError
+          ? error.retryable
+          : true,
     },
   };
 }
 export async function POST(request: Request) {
   try {
     const access = await requireResearchAccess();
-    const origin = request.headers.get('origin');
-    if (origin && origin !== new URL(request.url).origin)
-      return Response.json({ error: '不允许跨站启动研究。' }, { status: 403 });
-    const raw = await request.text();
-    if (raw.length > 6000)
-      return Response.json({ error: '请求过长。' }, { status: 413 });
-    const body = JSON.parse(raw);
+    const body = await readAIRequestJSON(request, 96_000);
+    let reportTemplate;
+    try {
+      reportTemplate =
+        body.reportTemplate === undefined
+          ? undefined
+          : validateResearchTemplate(body.reportTemplate);
+    } catch (error) {
+      return Response.json(
+        { error: (error as Error).message, code: 'invalid_template' },
+        { status: 400 },
+      );
+    }
     const userId = access.user.userId;
     let task =
       typeof body.taskId === 'string'
@@ -67,6 +81,7 @@ export async function POST(request: Request) {
       return Response.json({ error: '任务不存在。' }, { status: 404 });
     if (task?.status === 'completed' && task.report_json)
       return Response.json(JSON.parse(task.report_json));
+    await resolveUserAICredential(access.user);
     if (!task) {
       const query =
         typeof body.query === 'string' ? body.query.trim().slice(0, 500) : '';
@@ -77,7 +92,7 @@ export async function POST(request: Request) {
         );
       const model = resolvePermittedAIModel(
         access,
-        body.model ?? defaultResearchModel(access.allowedAIModels),
+        body.model ?? access.preferredResearchModel,
       );
       const listings = await searchListedSecurities(query).catch(() => []);
       let listing = listings.find((x) => x.id === body.listingId);
@@ -103,6 +118,7 @@ export async function POST(request: Request) {
         model,
         tokenLimit: body.tokenLimit,
         usdLimit: body.usdLimit,
+        reportTemplate,
       });
     }
     resolvePermittedAIModel(access, task.model);
@@ -115,7 +131,7 @@ export async function POST(request: Request) {
       );
     const leaseId = await claimResearchTask(userId, task.id);
     try {
-      await consumeDailyResearchQuota(access, task.id, leaseId);
+      await recordResearchUsage(access, task.id, leaseId);
     } catch (error) {
       await finishResearchTask(
         userId,
@@ -127,76 +143,83 @@ export async function POST(request: Request) {
       throw error;
     }
     const current = task;
-    const run = async (
-      signal: AbortSignal,
-      onProgress?: (event: ResearchProgress) => void,
-    ) => {
-      try {
-        const { report } = await generateCompanyResearch({
-          query: current.query,
-          listing: JSON.parse(current.listing_json) as ListingOption,
-          model: current.model,
-          userId,
-          signal,
-          researchTaskId: current.id,
-          leaseId,
-          onProgress: async (event) => {
-            await updateTaskProgress(
-              userId,
-              current.id,
-              leaseId,
-              event.stage,
-              event.message,
-              event.completedStage,
-            );
-            onProgress?.(event);
-          },
-        });
-        // Save on the server before acknowledging success to the browser.
-        await finishResearchTask(
-          userId,
-          current.id,
-          leaseId,
-          'completed',
-          undefined,
-          report,
-        );
-        return report;
-      } catch (error) {
-        await finishResearchTask(
-          userId,
-          current.id,
-          leaseId,
-          error instanceof ResearchTaskError && error.code === 'budget_stopped'
-            ? 'budget_stopped'
-            : signal.aborted
-              ? 'interrupted'
-              : 'failed',
-          errorPayload(error).body.error,
-        ).catch(() => undefined);
-        throw error;
-      }
-    };
+    const runtimeDeadline = Date.now() + TASK_RUNTIME_MS - 5000;
+    const run = await bindResearchIdentity(
+      async (
+        signal: AbortSignal,
+        onProgress?: (event: ResearchProgress & { updatedAt: string }) => void,
+      ) => {
+        try {
+          const { report } = await generateCompanyResearch({
+            query: current.query,
+            listing: JSON.parse(current.listing_json) as ListingOption,
+            model: current.model,
+            userId,
+            signal,
+            researchTaskId: current.id,
+            leaseId,
+            reportTemplate: current.template_json
+              ? validateResearchTemplate(JSON.parse(current.template_json))
+              : undefined,
+            onProgress: async (event) => {
+              const updatedAt = await updateTaskProgress(
+                userId,
+                current.id,
+                leaseId,
+                event.stage,
+                event.message,
+                event.completedStage,
+              );
+              onProgress?.({ ...event, updatedAt });
+            },
+          });
+          // Save on the server before acknowledging success to the browser.
+          await finishResearchTask(
+            userId,
+            current.id,
+            leaseId,
+            'completed',
+            undefined,
+            report,
+          );
+          return report;
+        } catch (error) {
+          await finishResearchTask(
+            userId,
+            current.id,
+            leaseId,
+            error instanceof ResearchTaskError &&
+              error.code === 'budget_stopped'
+              ? 'budget_stopped'
+              : signal.aborted
+                ? 'interrupted'
+                : 'failed',
+            errorPayload(error).body.error,
+          ).catch(() => undefined);
+          throw error;
+        }
+      },
+    );
     const abort = new AbortController(),
       signal = AbortSignal.any([
         request.signal,
         abort.signal,
-        AbortSignal.timeout(TASK_LEASE_MS - 5000),
+        AbortSignal.timeout(Math.max(1, runtimeDeadline - Date.now())),
       ]);
-    // Status reads only: cancellation polling never invokes AI or retries work.
+    // Only the executing request renews liveness. A tab/status poll cannot keep
+    // a dead Worker locked; this timer never invokes or retries the model.
+    let checking = false;
     const cancellation = setInterval(() => {
-      void getResearchTask(userId, current.id)
-        .then((row) => {
-          if (
-            !row ||
-            row.lease_id !== leaseId ||
-            row.status !== 'running' ||
-            !row.lease_expires_at ||
-            row.lease_expires_at <= new Date().toISOString()
-          )
-            abort.abort();
+      if (checking || signal.aborted) return;
+      checking = true;
+      void renewResearchTaskLease(userId, current.id, leaseId, runtimeDeadline)
+        .then((alive) => {
+          if (!alive) abort.abort();
         })
-        .catch(() => abort.abort());
+        .catch(() => abort.abort())
+        .finally(() => {
+          checking = false;
+        });
     }, 5000);
     if (!request.headers.get('accept')?.includes('application/x-ndjson')) {
       try {
@@ -242,7 +265,7 @@ export async function POST(request: Request) {
       {
         headers: {
           'Content-Type': 'application/x-ndjson; charset=utf-8',
-          'Cache-Control': 'private, no-store',
+          'Cache-Control': 'private, no-store, no-transform',
           'X-Accel-Buffering': 'no',
         },
       },

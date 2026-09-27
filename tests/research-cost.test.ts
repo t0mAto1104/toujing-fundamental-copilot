@@ -28,13 +28,21 @@ const complete: ResearchDossier = {
       title: '2026年半年度报告',
       date: '2026-08-28',
       kind: '正式披露',
+      extraction: {
+        totalPages: 100,
+        pagesRead: 100,
+        complete: true,
+        warnings: [],
+      },
       publisher: '离线测试',
       url: 'https://example.test/report',
       fetchedAt: new Date(now).toISOString(),
       excerpts: [
+        '公司简介：本公司于2000年成立，主要业务为合成测试业务',
         '分产品营业收入',
         '同行业公司：样本股份有限公司',
-        '行业需求政策',
+        '行业需求政策及市场规模、渗透率',
+        '供应商原料客户、认证量产收入',
         '联营企业权益法',
         '关联交易及受限资金',
       ].map((text, page) => ({

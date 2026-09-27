@@ -1,8 +1,10 @@
 import { OpenAIResearchError, runStructuredResearch } from '@/lib/openai';
+import { resolveUserAICredential } from '@/lib/ai-credentials';
+import { readAIRequestJSON } from '@/lib/ai-request-security';
 import { normalizeSources, stripUrls } from '@/lib/ai-output';
 import {
   assertResearchAccess,
-  consumeDailyResearchQuota,
+  recordResearchUsage,
   ResearchAccessError,
   resolvePermittedAIModel,
 } from '@/lib/site-users';
@@ -20,16 +22,17 @@ const followupSchema = {
 export async function POST(request: Request) {
   try {
     const access = await assertResearchAccess();
-    const body = (await request.json()) as {
+    const body = (await readAIRequestJSON(request)) as {
       company?: string;
       question?: string;
       context?: string;
       model?: string;
     };
+    await resolveUserAICredential(access.user);
     if (!body.question?.trim())
       return Response.json({ error: 'question is required' }, { status: 400 });
     const model = resolvePermittedAIModel(access, body.model);
-    await consumeDailyResearchQuota(access);
+    await recordResearchUsage(access);
     const result = await runStructuredResearch<{
       answer: string;
       keyPoints: string[];
@@ -59,7 +62,7 @@ export async function POST(request: Request) {
     const known = error instanceof OpenAIResearchError ? error : null;
     return Response.json(
       {
-        error: error instanceof Error ? error.message : '追问服务暂不可用',
+        error: known?.message || '追问服务暂不可用',
         code: known?.kind || 'api_error',
         retryable: known?.retryable ?? true,
       },

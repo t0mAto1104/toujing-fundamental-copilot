@@ -1,4 +1,6 @@
 import { OpenAIResearchError, runStructuredResearch } from '@/lib/openai';
+import { resolveUserAICredential } from '@/lib/ai-credentials';
+import { readAIRequestJSON } from '@/lib/ai-request-security';
 import {
   acquireDailyBrief,
   failDailyBrief,
@@ -6,6 +8,7 @@ import {
 } from '@/lib/daily-brief-cache';
 import {
   assertResearchAccess,
+  recordResearchUsage,
   ResearchAccessError,
   resolvePermittedAIModel,
 } from '@/lib/site-users';
@@ -119,15 +122,16 @@ export async function POST(request: Request) {
   let leaseAcquired = false;
   try {
     const access = await assertResearchAccess();
-    const snapshot = (await request.json()) as {
+    const snapshot = (await readAIRequestJSON(request)) as {
       stocks?: Array<{ name: string; percent: number }>;
       sectors?: Array<{ name: string; percent: number }>;
       mode?: 'market' | 'macro';
     };
+    await resolveUserAICredential(access.user);
     const mode = snapshot.mode === 'macro' ? 'macro' : 'market';
     const model = resolvePermittedAIModel(access, undefined);
     const dateKey = chinaDateKey();
-    cacheKey = `${dateKey}|${mode}`;
+    cacheKey = `${dateKey}|${mode}|${model}|${encodeURIComponent(access.user.userId)}`;
     const cached = await acquireDailyBrief(
       cacheKey,
       dateKey,
@@ -157,6 +161,7 @@ export async function POST(request: Request) {
         { status: 503 },
       );
     leaseAcquired = true;
+    await recordResearchUsage(access);
     const result = await runStructuredResearch<Record<string, unknown>>({
       name: 'a_share_market_brief',
       schema: briefSchema,
@@ -170,7 +175,11 @@ export async function POST(request: Request) {
     await storeDailyBrief(cacheKey, value);
     return Response.json(value);
   } catch (error) {
-    if (error instanceof ResearchAccessError)
+    if (error instanceof ResearchAccessError) {
+      if (leaseAcquired && cacheKey)
+        await failDailyBrief(cacheKey, error.code, error.message).catch(
+          () => null,
+        );
       return Response.json(
         {
           error: error.message,
@@ -179,8 +188,9 @@ export async function POST(request: Request) {
         },
         { status: error.status },
       );
+    }
     const known = error instanceof OpenAIResearchError ? error : null;
-    const message = error instanceof Error ? error.message : '市场研究暂不可用';
+    const message = known?.message || '市场研究暂不可用';
     const retryAfter =
       leaseAcquired && cacheKey
         ? await failDailyBrief(

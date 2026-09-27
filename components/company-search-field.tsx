@@ -162,7 +162,10 @@ export function CompanySearchField({
   };
 
   return (
-    <form onSubmit={submit} className={`relative ${className}`}>
+    <form
+      onSubmit={submit}
+      className={`company-search-field relative ${className}`}
+    >
       <Search className="pointer-events-none absolute left-3.5 top-1/2 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input
         value={value}

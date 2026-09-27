@@ -28,7 +28,6 @@ type ManagedUser = {
   lastSeenAt: string;
   researchCount: number;
   researchEnabled: boolean;
-  dailyResearchLimit: number;
   dailyResearchUsed: number;
   aiRequestCount: number;
   totalTokens: number;
@@ -36,6 +35,7 @@ type ManagedUser = {
 };
 
 type UsageEvent = {
+  billingSource?: 'personal' | 'site' | null;
   id: string;
   userId: string;
   email: string;
@@ -91,7 +91,6 @@ export function AdminDashboard() {
     tokensToday: 0,
     webSearchesToday: 0,
   });
-  const [limitDrafts, setLimitDrafts] = useState<Record<string, string>>({});
   const [modelDrafts, setModelDrafts] = useState<Record<string, AIModelId[]>>(
     {},
   );
@@ -126,11 +125,6 @@ export function AdminDashboard() {
           tokensToday: 0,
           webSearchesToday: 0,
         },
-      );
-      setLimitDrafts(
-        Object.fromEntries(
-          nextUsers.map((user) => [user.id, String(user.dailyResearchLimit)]),
-        ),
       );
       setModelDrafts(
         Object.fromEntries(
@@ -175,7 +169,6 @@ export function AdminDashboard() {
     userId: string,
     change: {
       researchEnabled?: boolean;
-      dailyResearchLimit?: number;
       allowedAIModels?: AIModelId[];
     },
     key: string,
@@ -210,19 +203,6 @@ export function AdminDashboard() {
     );
   };
 
-  const updateLimit = async (user: ManagedUser) => {
-    const nextLimit = Number(limitDrafts[user.id]);
-    if (!Number.isInteger(nextLimit) || nextLimit < 0 || nextLimit > 500) {
-      setError('每日研究上限必须是 0 至 500 之间的整数。');
-      return;
-    }
-    await patchUser(
-      user.id,
-      { dailyResearchLimit: nextLimit },
-      `${user.id}:limit`,
-    );
-  };
-
   const updateModels = async (user: ManagedUser) => {
     const allowedAIModels = modelDrafts[user.id] || [];
     if (!allowedAIModels.length) {
@@ -242,7 +222,7 @@ export function AdminDashboard() {
               用户与 AI 用量管理
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-              查看登录用户、最后活跃时间、每日研究额度及实际 Token
+              查看登录用户、最后活跃时间、每日研究次数及实际 Token
               用量；可暂停或恢复研究权限，并限制每个用户可选择的 AI 模型。
             </p>
           </div>
@@ -329,7 +309,7 @@ export function AdminDashboard() {
                 <th className="px-4 py-3 font-medium">用户</th>
                 <th className="px-4 py-3 font-medium">最后活跃</th>
                 <th className="px-4 py-3 text-right font-medium">累计报告</th>
-                <th className="px-4 py-3 font-medium">今日研究额度</th>
+                <th className="px-4 py-3 font-medium">今日研究次数</th>
                 <th className="px-4 py-3 text-right font-medium">
                   近 30 日 AI 请求
                 </th>
@@ -344,9 +324,6 @@ export function AdminDashboard() {
               {visibleUsers.map((user) => {
                 const currentAdmin = user.id === currentAdminId;
                 const accessKey = `${user.id}:access`;
-                const limitKey = `${user.id}:limit`;
-                const limitChanged =
-                  limitDrafts[user.id] !== String(user.dailyResearchLimit);
                 const modelKey = `${user.id}:models`;
                 const selectedModels = modelDrafts[user.id] || [];
                 const modelsChanged =
@@ -374,40 +351,9 @@ export function AdminDashboard() {
                       {formatNumber(user.researchCount)}
                     </td>
                     <td className="px-4 py-3.5">
-                      <div className="flex items-center gap-2">
-                        <span className="min-w-12 font-mono text-[10px] text-muted-foreground">
-                          {user.dailyResearchUsed} /
-                        </span>
-                        <Input
-                          aria-label={`${user.email} 每日研究上限`}
-                          type="number"
-                          min={0}
-                          max={500}
-                          step={1}
-                          value={limitDrafts[user.id] ?? ''}
-                          onChange={(event) =>
-                            setLimitDrafts((current) => ({
-                              ...current,
-                              [user.id]: event.target.value,
-                            }))
-                          }
-                          className="h-8 w-20 font-mono text-xs"
-                        />
-                        <button
-                          type="button"
-                          aria-label="保存每日研究上限"
-                          title="保存每日研究上限"
-                          disabled={!limitChanged || changingKey === limitKey}
-                          onClick={() => void updateLimit(user)}
-                          className="inline-flex size-8 items-center justify-center border border-border text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
-                        >
-                          {changingKey === limitKey ? (
-                            <RefreshCw className="size-3 animate-spin" />
-                          ) : (
-                            <Save className="size-3" />
-                          )}
-                        </button>
-                      </div>
+                      <span className="font-mono">
+                        {formatNumber(user.dailyResearchUsed)}
+                      </span>
                     </td>
                     <td className="px-4 py-3.5 text-right font-mono">
                       {formatNumber(user.aiRequestCount)}
@@ -496,7 +442,7 @@ export function AdminDashboard() {
             </div>
             <p className="text-[10px] text-muted-foreground">
               最多显示最近 100
-              条；中断且未返回用量的请求显示“未知”，不等于未收费。
+              条；含个人与站点调用，汇总费用不等于站点账单。中断且未返回用量的请求显示“未知”，不等于未收费。
             </p>
           </div>
           <div className="mt-4 overflow-x-auto border border-border">
@@ -507,6 +453,7 @@ export function AdminDashboard() {
                   <th className="px-3 py-3 font-medium">用户</th>
                   <th className="px-3 py-3 font-medium">接口</th>
                   <th className="px-3 py-3 font-medium">模型</th>
+                  <th className="px-3 py-3 font-medium">计费来源</th>
                   <th className="px-3 py-3 text-right font-medium">输入</th>
                   <th className="px-3 py-3 text-right font-medium">
                     缓存读 / 写
@@ -546,6 +493,13 @@ export function AdminDashboard() {
                     </td>
                     <td className="px-3 py-3 font-mono text-[10px] text-muted-foreground">
                       {event.model}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 text-muted-foreground">
+                      {event.billingSource === 'personal'
+                        ? '个人 API'
+                        : event.billingSource === 'site'
+                          ? '站点 API'
+                          : '历史记录未标注'}
                     </td>
                     <td className="px-3 py-3 text-right font-mono">
                       {event.usageKnown === false

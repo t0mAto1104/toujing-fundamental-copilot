@@ -1,11 +1,13 @@
 import { ensureReportDatabase, getReportDatabase } from '@/lib/report-database';
 import { AI_PRICING_VERSION, estimateAIUsd } from '@/lib/ai-pricing';
 import { settlementStatements } from '@/lib/research-tasks';
+import type { BillingSource } from '@/lib/ai-credentials';
 
 export type AIUsageRecord = {
   userId: string;
   endpoint: string;
   model: string;
+  billingSource?: BillingSource;
   inputTokens?: number;
   cachedInputTokens?: number;
   cacheWriteTokens?: number;
@@ -33,8 +35,8 @@ export async function recordAIUsage(record: AIUsageRecord) {
         reasoning_tokens, total_tokens, web_search_requests, status,
         request_id, error_code, created_at, research_task_id,
         cached_input_tokens, cache_write_tokens, service_tier,
-        estimated_cost_usd, pricing_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        estimated_cost_usd, pricing_version, billing_source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       record.reservationId || crypto.randomUUID(),
@@ -56,6 +58,7 @@ export async function recordAIUsage(record: AIUsageRecord) {
       record.serviceTier || null,
       estimatedCostUsd,
       estimatedCostUsd === null ? null : AI_PRICING_VERSION,
+      record.billingSource || null,
     );
   if (record.reservationId) {
     await database.batch([

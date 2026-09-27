@@ -62,81 +62,98 @@ export default function ReportsPage() {
             />
           </div>
         </div>
-        <ResearchTaskCenter />
-        {visible.length ? (
-          <div className="mt-6 overflow-hidden rounded-2xl border border-border">
-            {visible.map((report) => (
-              <article
-                key={report.id}
-                className="group grid gap-4 border-b border-border bg-card p-5 last:border-b-0 sm:grid-cols-[1fr_auto]"
-              >
-                <a
-                  href={`/company/research?saved=${encodeURIComponent(report.id)}&query=${encodeURIComponent(report.query)}${report.listingId ? `&listing=${encodeURIComponent(report.listingId)}` : ''}`}
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-base font-semibold group-hover:text-primary">
-                      {report.companyName}
-                    </h2>
-                    <span className="font-mono text-[10px] text-muted-foreground">
-                      {report.exchange} · {report.companyCode}
-                    </span>
-                    <span className="rounded bg-primary/8 px-2 py-0.5 text-[10px] text-primary">
-                      {report.stance}
-                    </span>
-                  </div>
-                  {report.quote ? (
-                    <div className="mt-2 flex items-baseline gap-2">
-                      <span className="font-mono text-sm font-semibold">
-                        {report.quote.price} {report.quote.currency}
-                      </span>
-                      <span
-                        className={`font-mono text-[10px] ${report.quote.change.startsWith('-') ? 'text-emerald-700' : 'text-red-600'}`}
-                      >
-                        {report.quote.change}
-                      </span>
-                      <span className="text-[9px] text-muted-foreground">
-                        保存时行情
-                      </span>
-                    </div>
-                  ) : null}
-                  <p className="mt-2 line-clamp-2 max-w-3xl text-xs leading-6 text-muted-foreground">
-                    {report.conclusion}
-                  </p>
-                  <p className="mt-3 text-[10px] text-muted-foreground">
-                    {report.industry} · 更新于 {report.updatedAt}
-                  </p>
-                </a>
-                <button
-                  onClick={() => remove(report.id)}
-                  className="self-start rounded-lg p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                  aria-label={`删除${report.companyName}报告`}
-                >
-                  <Trash2 className="size-4" />
-                </button>
-              </article>
-            ))}
+        <section className="mt-6">
+          <h2 id="saved-reports-title" className="mb-3 text-lg font-semibold">
+            保存的报告
+          </h2>
+          <div
+            role="region"
+            aria-labelledby="saved-reports-title"
+            tabIndex={0}
+            className="h-[min(60dvh,36rem)] min-h-64 overflow-y-auto rounded-2xl border border-border [scrollbar-gutter:stable] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          >
+            {visible.length ? (
+              <div>
+                {visible.map((report) => (
+                  <article
+                    key={report.id}
+                    className="group grid gap-4 border-b border-border bg-card p-5 last:border-b-0 sm:grid-cols-[1fr_auto]"
+                  >
+                    <a
+                      href={`/company/research?saved=${encodeURIComponent(report.id)}&query=${encodeURIComponent(report.query)}${report.listingId ? `&listing=${encodeURIComponent(report.listingId)}` : ''}`}
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h2 className="text-base font-semibold group-hover:text-primary">
+                          {report.companyName}
+                        </h2>
+                        <span className="font-mono text-[10px] text-muted-foreground">
+                          {report.exchange} · {report.companyCode}
+                        </span>
+                        <span className="rounded bg-primary/8 px-2 py-0.5 text-[10px] text-primary">
+                          {report.stance}
+                        </span>
+                      </div>
+                      {report.quote ? (
+                        <div className="mt-2 flex items-baseline gap-2">
+                          <span className="font-mono text-sm font-semibold">
+                            {report.quote.price} {report.quote.currency}
+                          </span>
+                          <span
+                            className={`font-mono text-[10px] ${report.quote.change.startsWith('-') ? 'text-emerald-700' : 'text-red-600'}`}
+                          >
+                            {report.quote.change}
+                          </span>
+                          <span className="text-[9px] text-muted-foreground">
+                            保存时行情
+                          </span>
+                        </div>
+                      ) : null}
+                      <p className="mt-2 line-clamp-2 max-w-3xl text-xs leading-6 text-muted-foreground">
+                        {report.conclusion}
+                      </p>
+                      <p className="mt-3 text-[10px] text-muted-foreground">
+                        {report.industry} · 更新于 {report.updatedAt}
+                      </p>
+                    </a>
+                    <button
+                      onClick={() => remove(report.id)}
+                      className="self-start rounded-lg p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      aria-label={`删除${report.companyName}报告`}
+                    >
+                      <Trash2 className="size-4" />
+                    </button>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="flex min-h-full flex-col items-center justify-center p-5 text-center">
+                <span className="grid size-12 place-items-center rounded-2xl bg-muted text-primary">
+                  <FileChartColumn className="size-5" />
+                </span>
+                <h3 className="mt-4 text-base font-semibold">
+                  {query.trim() ? '没有找到匹配的报告' : '还没有已保存的报告'}
+                </h3>
+                <p className="mt-2 max-w-sm text-xs leading-6 text-muted-foreground">
+                  {query.trim()
+                    ? '请尝试其他公司名称、股票代码或行业。'
+                    : '在公司分析页生成一份报告后会自动保存到这里；报告正文仍可通过浏览器打印另存为 PDF。'}
+                </p>
+                {!query.trim() && (
+                  <a
+                    href="/research"
+                    className="mt-5 rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground"
+                  >
+                    开始第一份研究
+                  </a>
+                )}
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="mt-8 flex min-h-[360px] flex-col items-center justify-center rounded-2xl border border-dashed border-border text-center">
-            <span className="grid size-12 place-items-center rounded-2xl bg-muted text-primary">
-              <FileChartColumn className="size-5" />
-            </span>
-            <h2 className="mt-4 text-base font-semibold">还没有已保存的报告</h2>
-            <p className="mt-2 max-w-sm text-xs leading-6 text-muted-foreground">
-              在公司分析页生成一份报告后会自动保存到这里；报告正文仍可通过浏览器打印另存为
-              PDF。
-            </p>
-            <a
-              href="/research"
-              className="mt-5 rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground"
-            >
-              开始第一份研究
-            </a>
-          </div>
-        )}
+        </section>
         <p className="mt-6 text-[10px] text-muted-foreground">
           登录用户的完整报告会安全同步；未登录时仅保存在当前浏览器。
         </p>
+        <ResearchTaskCenter />
       </div>
     </WorkspaceShell>
   );

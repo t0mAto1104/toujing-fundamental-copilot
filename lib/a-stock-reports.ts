@@ -1,5 +1,10 @@
 import { eastmoneyJson } from '@/lib/a-stock-http';
-import { getOrRefreshDataSnapshot } from '@/lib/data-snapshot-cache';
+import {
+  getOrRefreshDataSnapshot,
+  readDataSnapshot,
+} from '@/lib/data-snapshot-cache';
+import { getSinaReports } from '@/lib/a-stock-sina-reports';
+import { sourceCount, sourceDay, uniqueRows } from '@/lib/source-validation';
 
 type EastmoneyIndustryReport = {
   title?: string;
@@ -45,6 +50,8 @@ export type IndustryReportsSnapshot = {
   provider: string;
   sourceUrl: string;
   methodology: string;
+  page?: number;
+  hasMore?: boolean;
 };
 
 export const INDUSTRY_REPORTS_CACHE_KEY = 'reports:industry:latest:v2';
@@ -83,14 +90,14 @@ function mapReports(records: EastmoneyIndustryReport[]) {
   return records.flatMap((record) => {
     const id = String(record.infoCode || '').trim();
     const title = String(record.title || '').trim();
-    if (!id || !title) return [];
+    if (!id || !title) throw new Error('研报缺少标识或标题');
     const pages = Number(record.attachPages);
     const sizeKb = Number(record.attachSize);
     return [
       {
         id,
         title,
-        publishedAt: String(record.publishDate || '').slice(0, 10),
+        publishedAt: sourceDay(record.publishDate),
         industryName: String(record.industryName || '未分类'),
         industryCode: String(record.industryCode || ''),
         organization: String(record.orgSName || record.orgName || '研究机构'),
@@ -108,21 +115,24 @@ function mapReports(records: EastmoneyIndustryReport[]) {
 async function fetchIndustryReports(
   industryCode: string,
   maxPages: number,
+  startPage = 1,
+  pageSize = 100,
+  signal?: AbortSignal,
 ): Promise<IndustryReportsSnapshot> {
   const url = new URL(REPORT_API);
   const reports: IndustryReportItem[] = [];
   let total = 0;
   let pages = 1;
 
-  for (let pageNo = 1; pageNo <= maxPages; pageNo += 1) {
+  for (let pageNo = startPage; pageNo < startPage + maxPages; pageNo += 1) {
     const params = {
       industryCode,
-      pageSize: '100',
+      pageSize: String(pageSize),
       industry: '*',
       rating: '*',
       ratingChange: '*',
       beginTime: twoYearsAgo(),
-      endTime: '2030-01-01',
+      endTime: new Date().toISOString().slice(0, 10),
       pageNo: String(pageNo),
       fields: '',
       qType: '1',
@@ -132,19 +142,33 @@ async function fetchIndustryReports(
 
     const payload = await eastmoneyJson<EastmoneyIndustryReportResponse>(
       url,
-      { headers: { Referer: 'https://data.eastmoney.com/' } },
+      { headers: { Referer: 'https://data.eastmoney.com/' }, signal },
       20_000,
     );
-    reports.push(...mapReports(payload.data || []));
-    total = Number(payload.hits) || total;
-    pages = Number(payload.TotalPage) || pageNo;
+    const currentTotal = sourceCount(payload.hits);
+    if (pageNo > startPage && currentTotal !== total)
+      throw new Error('研报分页期间总数变化，请重新查询');
+    total = currentTotal;
+    pages = sourceCount(payload.TotalPage);
+    if (pages !== Math.ceil(total / pageSize))
+      throw new Error('研报总页数与总条数不一致');
+    if (
+      !Array.isArray(payload.data) ||
+      payload.data.length !==
+        Math.min(pageSize, Math.max(0, total - (pageNo - 1) * pageSize))
+    )
+      throw new Error('研报分页记录不完整');
+    const mapped = mapReports(payload.data);
+    if (
+      industryCode !== '*' &&
+      mapped.some((r) => r.industryCode !== industryCode)
+    )
+      throw new Error('研报接口返回了其他行业');
+    reports.push(...mapped);
     if (!payload.data?.length || pageNo >= pages) break;
   }
 
-  const dedupedReports = Array.from(
-    new Map(reports.map((report) => [report.id, report])).values(),
-  );
-  if (!dedupedReports.length) throw new Error('东方财富行业研报接口返回空结果');
+  const dedupedReports = uniqueRows(reports, (r) => r.id);
 
   return {
     reports: dedupedReports,
@@ -153,6 +177,8 @@ async function fetchIndustryReports(
     provider: '东方财富行业研报',
     sourceUrl: url.toString(),
     methodology: `按a-stock-data的东财研报接口规范，以qType=1和industryCode=${industryCode}获取行业原始研报；列表仅展示机构、评级与原始标题，不由AI改写，详情和PDF均链接至原始来源。`,
+    page: startPage,
+    hasMore: startPage + maxPages - 1 < pages,
   };
 }
 
@@ -208,13 +234,67 @@ function findIndustryCodes(reports: IndustryReportItem[], query: string) {
   const aliases = RELATED_INDUSTRY_CODE_ALIASES[keyword];
   if (aliases) return aliases;
 
-  return Array.from(
-    new Set(
-      filterReports(candidates, query)
-        .map((report) => report.industryCode)
-        .filter(Boolean),
-    ),
-  ).slice(0, 3);
+  // An institution/title match is not an industry match.
+  return [];
+}
+
+export async function getIndustryReportsPage(
+  query: string,
+  source: 'eastmoney' | 'sina',
+  page: number,
+  signal?: AbortSignal,
+) {
+  if (source === 'sina') {
+    const snapshot = await getSinaReports(undefined, page, signal);
+    const industry = snapshot.data.filter((r) => /行业/.test(r.industryName));
+    const reports = filterReports(industry, query);
+    return {
+      reports,
+      total: reports.length,
+      updatedAt: snapshot.fetchedAt,
+      stale: snapshot.stale,
+      provider: '新浪财经研报',
+      sourceUrl: snapshot.sourceUrl,
+      page,
+      hasMore: snapshot.data.length >= 40,
+      methodology:
+        '新浪全市场研报第 ' +
+        page +
+        ' 页中的行业研报；关键词仅匹配本页标题、机构和研究员，并非全库检索。仅提供详情链接，不保证 PDF、评级或特定券商覆盖。',
+    };
+  }
+  let code = '*';
+  if (query) {
+    const base = await readDataSnapshot<IndustryReportsSnapshot>(
+      INDUSTRY_REPORTS_CACHE_KEY,
+    );
+    const firstPage = await readDataSnapshot<IndustryReportsSnapshot>(
+      'industry-reports:page:v39:*:1',
+    );
+    const codes = findIndustryCodes(
+      base?.value.reports ?? firstPage?.value.reports ?? [],
+      query,
+    );
+    if (codes.length === 1) code = codes[0];
+  }
+  const snapshot = await getOrRefreshDataSnapshot({
+    cacheKey: `industry-reports:page:v39:${code}:${page}`,
+    category: 'industry_reports',
+    ttlMs: REPORT_CACHE_TTL_MS,
+    sourceName: '东方财富行业研报',
+    sourceUrl: REPORT_API,
+    requestScoped: true,
+    refresh: () => fetchIndustryReports(code, 1, page, 40, signal),
+  });
+  const value = snapshot.value,
+    reports =
+      code === '*' ? filterReports(value.reports, query) : value.reports;
+  return {
+    ...value,
+    reports,
+    stale: snapshot.stale,
+    methodology: `来源第 ${page} 页，本页 ${value.reports.length} 条${query && code === '*' ? '，按标题、机构、研究员及行业名称匹配 ' + reports.length + ' 条（不是全库搜索）' : ''}。源声明该查询共 ${value.total} 条；可继续翻页，不保证特定券商覆盖。`,
+  };
 }
 
 function filterReports(reports: IndustryReportItem[], query: string) {

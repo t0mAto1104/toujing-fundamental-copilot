@@ -1,0 +1,1 @@
+ALTER TABLE `research_tasks` ADD `template_json` text;

@@ -20,7 +20,7 @@ function useSentiment<T>(query: string) {
   const feed = useMarketFeed<SignalSnapshot<T>>(
     `/api/sentiment?${query}`,
     300_000,
-    22_000,
+    query.startsWith('kind=questions') ? 28_000 : 22_000,
   );
   const [expiredAt, setExpiredAt] = useState('');
   const fetchedAt = feed.data?.fetchedAt;
@@ -219,11 +219,11 @@ function QuestionFeed({ symbol, days }: { symbol: string; days: 7 | 30 }) {
   );
   return (
     <SignalFrame
-      title="互动易 · 投资者问答"
+      title="沪深互动 · 投资者问答"
       feed={feed}
       note={
         feed.data?.data.coverage ||
-        '仅覆盖深市。按提问时间筛选近期问答，投资者的提问不代表已确认事实；公司回复亦需结合正式公告核验。'
+        '深市互动易、沪市上证e互动。按提问时间筛选近期问答；公司回复需结合正式公告核验。'
       }
     >
       {feed.data ? (
@@ -328,7 +328,7 @@ export function CompanySentiment({ item }: { item: WatchlistItem }) {
         </a>
       </div>
       <ConceptHeat symbol={item.symbol} />
-      {item.symbol.startsWith('sz') ? (
+      {/^(sh|sz)/.test(item.symbol) ? (
         <>
           <label className="flex items-center gap-3 text-sm text-muted-foreground">
             问答范围
@@ -351,8 +351,7 @@ export function CompanySentiment({ item }: { item: WatchlistItem }) {
         <section className="saas-panel p-5">
           <h3 className="font-medium">互动易问答</h3>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            互动易仅覆盖深市公司。当前证券的沪市 /
-            北交所问答暂未接入，不代表该公司没有投资者互动信息。
+            当前来源只覆盖沪深公司，北交所暂不支持；不代表该公司没有投资者互动信息。
           </p>
         </section>
       )}

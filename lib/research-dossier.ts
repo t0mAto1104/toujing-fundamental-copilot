@@ -1,4 +1,9 @@
-import { getDocumentProxy } from 'unpdf';
+import { getResolvedPDFJS } from 'unpdf';
+import {
+  FINANCIAL_STATEMENT_FIELDS,
+  sinaFinancialField,
+} from '@/lib/research-financial-fields';
+import { readDisclosureBytes } from '@/lib/research-document-http';
 import { deduplicateNews } from '@/lib/news-evidence';
 import { cninfoOrgId } from '@/lib/a-stock-company';
 import {
@@ -11,13 +16,33 @@ import { listingAStockIdentity, aStockPrefix } from '@/lib/a-stock-ticker';
 import { getOrRefreshDataSnapshot } from '@/lib/data-snapshot-cache';
 import type { ListingOption } from '@/lib/market-listings';
 import type { SourceLink } from '@/lib/research-types';
-import { requestDeadline } from '@/lib/request-deadline';
+import {
+  abortable,
+  abortableDelay,
+  requestDeadline,
+} from '@/lib/request-deadline';
+import {
+  disclosureType,
+  missingDisclosureKinds,
+  researchPdfPageOrder,
+  selectDisclosureSources,
+} from '@/lib/research-disclosures';
 import {
   cashRestrictionTable,
+  researchPdfText,
   type CashRestrictionTable,
 } from '@/lib/research-pdf-tables';
 
 export type EvidenceDocument = SourceLink & {
+  htmlBodyComplete?: boolean;
+  disclosureType?: 'annual' | 'interim' | 'summary' | 'other';
+  extraction?: {
+    totalPages: number;
+    pagesRead: number;
+    textPages?: number;
+    complete: boolean;
+    warnings: string[];
+  };
   kind: '正式披露' | '财报接口' | '公司回复' | '机构研究' | '新闻';
   fetchedAt: string;
   excerpts: Array<{ page: number | null; text: string }>;
@@ -33,12 +58,16 @@ export type FinancialPeriod = {
   statement: string;
   sourceUrl: string;
   values: Record<string, string>;
+  fieldOrigins?: Record<string, { title: string; sourceField?: string }>;
 };
 export type ResearchDossier = {
   fetchedAt: string;
   documents: EvidenceDocument[];
   financialHistory: FinancialPeriod[];
   attempts: Array<{
+    url?: string;
+    date?: string;
+    publisher?: string;
     source: string;
     status: '取得' | '未取得';
     detail: string;
@@ -73,83 +102,139 @@ export function allowedDocumentUrl(input: string) {
 
 // A bounded, same-host, non-executable document fetch. Never fetch arbitrary
 // model-generated URLs, follow redirects to private hosts, or run PDF scripts.
+// ponytail: one PDF per isolate (128 MiB shared across requests). Wait using
+// request-local timers, never another request's I/O promise. Move extraction to
+// a dedicated service only if document throughput outgrows this bounded lane.
+let pdfActive = false;
 export async function readResearchPdf(
   source: SourceLink,
   signal?: AbortSignal,
 ): Promise<EvidenceDocument> {
   if (!allowedDocumentUrl(source.url))
     throw new Error('文档地址不在公开披露源白名单内');
-  const limit = 12 * 1024 * 1024;
-  const response = await fetch(source.url, {
+  const waiting = requestDeadline(20_000, signal);
+  try {
+    while (pdfActive) await abortableDelay(100, waiting.signal);
+    waiting.signal.throwIfAborted();
+    pdfActive = true;
+  } finally {
+    waiting.dispose();
+  }
+  try {
+    return await readResearchPdfInLane(source, signal);
+  } finally {
+    pdfActive = false;
+  }
+}
+
+async function readResearchPdfInLane(
+  source: SourceLink,
+  signal?: AbortSignal,
+): Promise<EvidenceDocument> {
+  const bytes = await readDisclosureBytes(source.url, {
     headers: {
       ...headers,
       Referer: source.url.includes('dfcfw')
         ? 'https://data.eastmoney.com/'
         : headers.Referer,
     },
-    redirect: 'error',
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(20_000)])
-      : AbortSignal.timeout(20_000),
+    limit: 12 * 1024 * 1024,
+    timeoutMs: 20_000,
+    signal,
   });
-  if (!response.ok || Number(response.headers.get('content-length')) > limit)
-    throw new Error('披露文件不可达或过大');
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('披露文件无正文');
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.length;
-      if (size > limit) {
-        await reader.cancel();
-        throw new Error('披露文件超出安全大小');
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-  }
   if (new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-')
     throw new Error('披露源未返回 PDF');
-  const pdfOptions = { isEvalSupported: false, useSystemFonts: false };
-  const pdf = await getDocumentProxy(bytes, pdfOptions);
+  const pdfOptions = {
+    isEvalSupported: false,
+    useSystemFonts: false,
+    disableFontFace: true,
+  };
+  const { getDocument } = await getResolvedPDFJS();
+  signal?.throwIfAborted();
+  // Keep the loading task itself, so cancellation can destroy even a PDF that
+  // has not finished opening. getDocumentProxy hides that task until loaded.
+  const loading = getDocument({ data: bytes, ...pdfOptions });
+  const deadline = requestDeadline(18_000, signal);
+  const pdf = await abortable(loading.promise, deadline.signal).catch(
+    async (error) => {
+      deadline.dispose();
+      await loading.destroy();
+      throw error;
+    },
+  );
   const pages: string[] = [];
   const cashRestrictions: CashRestrictionTable[] = [];
-  const started = Date.now();
+  const extraction = {
+    totalPages: pdf.numPages,
+    pagesRead: 0,
+    textPages: 0,
+    complete: false,
+    warnings: [] as string[],
+  };
+  console.info(
+    'research_pdf_parse',
+    JSON.stringify({
+      phase: 'start',
+      host: new URL(source.url).hostname,
+      totalPages: pdf.numPages,
+    }),
+  );
   try {
-    if (pdf.numPages > 260)
-      throw new Error('报告页数超出本轮解析范围，需联网补证');
-    for (let i = 1; i <= pdf.numPages; i++) {
-      signal?.throwIfAborted();
-      if (Date.now() - started > 15_000) throw new Error('披露正文解析超时');
-      const page = await pdf.getPage(i);
-      const text = await page.getTextContent();
-      const table = cashRestrictionTable(
-        text.items.filter((item) => 'str' in item),
-        i,
-      );
-      if (table) cashRestrictions.push(table);
-      pages.push(
-        text.items
-          .map((item) => ('str' in item ? item.str : ''))
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim(),
-      );
-      page.cleanup();
+    if (pdf.numPages > 1000) throw new Error('披露文件超过1000页安全上限');
+    for (const i of researchPdfPageOrder(pdf.numPages)) {
+      if (deadline.signal.aborted) break;
+      const page = await abortable(pdf.getPage(i), deadline.signal);
+      try {
+        const text = await abortable(page.getTextContent(), deadline.signal);
+        const items = text.items.filter((item) => 'str' in item);
+        const table = cashRestrictionTable(items, i);
+        if (table) cashRestrictions.push(table);
+        pages[i - 1] = researchPdfText(items);
+        extraction.pagesRead++;
+        if (pages[i - 1].length >= 60) extraction.textPages++;
+      } finally {
+        page.cleanup();
+      }
+      // Page cleanup does NOT release document-wide fonts/CMaps. On a long
+      // Chinese annual report those caches alone can exceed a Worker's 128 MiB.
+      // Release them between settled text reads; retain every page's plain text
+      // and table evidence. Never run cleanup concurrently with getTextContent.
+      if (extraction.pagesRead % 8 === 0)
+        await abortable(pdf.cleanup(), deadline.signal);
     }
+  } catch (error) {
+    if (!extraction.pagesRead) throw error;
+    extraction.warnings.push(
+      deadline.signal.aborted
+        ? '解析达到本轮时间预算，保留已读取页。'
+        : '部分页面解析失败，保留已读取页。',
+    );
   } finally {
-    await pdf.loadingTask.destroy();
+    deadline.dispose();
+    // Do not release the lane while a timed-out parser still retains resources.
+    await loading.destroy();
+    console.info(
+      'research_pdf_parse',
+      JSON.stringify({
+        phase: 'released',
+        totalPages: extraction.totalPages,
+        pagesRead: extraction.pagesRead,
+        aborted: deadline.signal.aborted,
+      }),
+    );
   }
+  extraction.complete =
+    extraction.pagesRead === extraction.totalPages &&
+    extraction.textPages >= Math.min(3, extraction.totalPages) &&
+    extraction.textPages >= extraction.totalPages / 2;
+  if (extraction.textPages < extraction.pagesRead / 2)
+    extraction.warnings.push(
+      '多数页面没有可提取文本，可能含扫描页；未执行 OCR，不能视为已读全文。',
+    );
+  if (!extraction.complete && !extraction.warnings.length)
+    extraction.warnings.push(
+      '达到页数或时间预算，未读取全部页面，不代表全文已核验。',
+    );
   const excerpts = selectDocumentExcerpts(pages);
   if (!excerpts.length)
     throw new Error('PDF 无可提取正文，可能为扫描件，不能以标题代替正文');
@@ -157,6 +242,25 @@ export async function readResearchPdf(
     ...source,
     kind: source.url.includes('H3_') ? '机构研究' : '正式披露',
     fetchedAt: new Date().toISOString(),
+    disclosureType: disclosureType(
+      (() => {
+        // A notice may mention a full report in its body. It does not become
+        // that report merely because the reference occurs on its first page.
+        if (['other', 'summary'].includes(disclosureType(source.title)))
+          return source.title;
+        const covers = [
+          ...(pages[0] || '')
+            .replace(/\s/g, '')
+            .matchAll(/20\d{2}年?(?:半年度|年度|中期)报告(?:摘要)?/g),
+        ].map((m) => m[0]);
+        return (
+          covers.find((title) => title.includes('摘要')) ||
+          covers[0] ||
+          source.title
+        );
+      })(),
+    ),
+    extraction,
     excerpts,
     ...(cashRestrictions.length ? { cashRestrictions } : {}),
   };
@@ -165,7 +269,31 @@ export async function readResearchPdf(
 // Diversity matters: taking only the beginning of an annual report misses debt,
 // related parties and associates. Preserve page numbers and original text.
 const excerptTopics = [
+  {
+    re: /公司简介|公司基本情况|历史沿革|(?:19|20)\d{2}年[^。]{0,80}(?:成立|设立|上市|重组)/,
+    count: 1,
+  },
+  {
+    re: /本公司(?:是|为).*证券公司|证券经纪|财富管理业务|投资银行业务/,
+    count: 1,
+  },
+  { re: /风险覆盖率|资本杠杆率|流动性覆盖率|净稳定资金率/, count: 1 },
+  {
+    re: /本行(?:的)?(?:主要)?(?:业务|经营范围)|本公司(?:为|是).*商业银行/,
+    count: 1,
+  },
+  { re: /净息差|净利息收益率/, count: 1 },
+  { re: /不良贷款率|拨备覆盖率|贷款减值准备/, count: 1 },
+  { re: /核心一级资本充足率|资本充足率/, count: 1 },
+  { re: /贷款和垫款.*吸收存款|利息净收入|净利息收入/, count: 1 },
   { re: /营业收入[\s\S]*营业成本[\s\S]*毛利率/, count: 2 },
+  {
+    re: /销售均价|产品价格|价格变动|产销情况|产能利用率|生产量.*销售量/,
+    count: 2,
+  },
+  { re: /重大.*项目|项目.*总投资|在建工程.*预算|重大.*非股权投资/, count: 1 },
+  { re: /扣除非经常性损益.*净利润|非经常性损益.*金额/, count: 1 },
+  { re: /配额|供给.*约束|替代.*技术/, count: 1 },
   // Give accounting notes their own slots before long business narratives.
   // Broad “质押/关联方” matches otherwise crowd out actual amounts and cash restrictions.
   { re: /重要的.*联营企业|联营企业.*财务信息/, count: 2 },
@@ -197,38 +325,56 @@ export function selectDocumentExcerpts(pages: string[], maxChars = 18_000) {
     }))
     .filter((x) => x.text.length > 60 && !/目\s*录/.test(x.text.slice(0, 150)));
   let used = 0;
-  for (const topic of excerptTopics) {
-    const matches = candidates
-      .filter((x) => !selected.has(x.page) && topic.re.test(x.text))
-      .sort((a, b) => {
-        const score = (x: typeof a) =>
-          (x.page > 8 ? 2 : 0) +
-          Math.min(6, (x.text.match(/\d\.\d+%/g) || []).length) +
-          (topic === excerptTopics[1] &&
-          /[一二三四五六七八九0-9]\s*、\s*[^。；：，、（）()]{2,18}业务/.test(
-            x.text,
-          )
-            ? 12
-            : 0) +
-          (/（二）\s*报告期内公司从事的主要业务|主要业务和经营模式/.test(x.text)
-            ? 8
-            : 0) +
-          (/客户优质|产品价格|产能提升|商业化落地|终端零售/.test(x.text)
-            ? 6
-            : 0) +
-          (/重要的.*联营企业|联营企业.*财务信息/.test(x.text) ? 8 : 0) -
-          (/本人承诺|本承诺|本人将|公司所处行业/.test(x.text) ? 20 : 0) -
-          (/母公司财务|母公司利润表/.test(x.text) ? 20 : 0);
-        return score(b) - score(a) || a.page - b.page;
-      });
-    for (const row of matches.slice(0, topic.count)) {
-      // Keep an entire table/page where possible, including its accounting scope.
-      const text = row.text.slice(0, 3600);
-      if (used + text.length > maxChars) continue;
-      selected.set(row.page, { page: row.page, text });
-      used += text.length;
+  for (let pass = 0; pass < 5; pass++)
+    for (const topic of excerptTopics) {
+      if (pass >= topic.count) continue;
+      const matches = candidates
+        .filter((x) => !selected.has(x.page) && topic.re.test(x.text))
+        .sort((a, b) => {
+          const score = (x: typeof a) =>
+            (x.page > 8 ? 2 : 0) +
+            Math.min(6, (x.text.match(/\d\.\d+%/g) || []).length) +
+            (topic.re.source.includes('主要业务') &&
+            /[一二三四五六七八九0-9]\s*、\s*[^。；：，、（）()]{2,18}业务/.test(
+              x.text,
+            )
+              ? 12
+              : 0) +
+            (/（二）\s*报告期内公司从事的主要业务|主要业务和经营模式/.test(
+              x.text,
+            )
+              ? 8
+              : 0) +
+            (/客户优质|产品价格|产能提升|商业化落地|终端零售/.test(x.text)
+              ? 6
+              : 0) +
+            (/重要的.*联营企业|联营企业.*财务信息/.test(x.text) ? 8 : 0) -
+            (/本人承诺|本承诺|本人将|公司所处行业/.test(x.text) ? 20 : 0) -
+            (/母公司财务|母公司利润表/.test(x.text) ? 20 : 0);
+          return score(b) - score(a) || a.page - b.page;
+        });
+      for (const row of matches) {
+        // Keep an entire table/page where possible, including its accounting scope.
+        const text = row.text;
+        if (text.length > 6000) continue;
+        if (used + text.length > maxChars) continue;
+        selected.set(row.page, { page: row.page, text });
+        used += text.length;
+        if (/营业收入.*毛利率|主营业务分产品/.test(row.text)) {
+          const next = candidates.find((p) => p.page === row.page + 1);
+          if (
+            next &&
+            !selected.has(next.page) &&
+            used + next.text.length <= maxChars &&
+            next.text.length <= 3600
+          ) {
+            selected.set(next.page, next);
+            used += next.text.length;
+          }
+        }
+        break;
+      }
     }
-  }
   if (!selected.size)
     for (const row of candidates.slice(0, 3))
       selected.set(row.page, { ...row, text: row.text.slice(0, 2000) });
@@ -245,7 +391,7 @@ async function announcementList(
 ): Promise<Announcement[]> {
   const identity = listingAStockIdentity(listing);
   if (!identity) return [];
-  const org = await cninfoOrgId(identity.code);
+  const org = await cninfoOrgId(identity.code, signal);
   if (!org) throw new Error('未取得公司公告主体映射');
   const body = new URLSearchParams({
     stock: `${identity.code},${org}`,
@@ -370,20 +516,12 @@ async function announcementBackup(
 }
 
 async function readSinaHtml(url: string, signal?: AbortSignal) {
-  const response = await fetch(url, {
+  const data = await readDisclosureBytes(url, {
     headers: { ...headers, Referer: 'https://finance.sina.com.cn/' },
-    redirect: 'error',
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(12_000)])
-      : AbortSignal.timeout(12_000),
+    limit: 3_000_000,
+    timeoutMs: 12_000,
+    signal,
   });
-  if (
-    !response.ok ||
-    Number(response.headers.get('content-length')) > 3_000_000
-  )
-    throw new Error('新浪公告正文暂不可用');
-  const data = await response.arrayBuffer();
-  if (data.byteLength > 3_000_000) throw new Error('新浪公告超出本轮读取大小');
   return new TextDecoder('gb18030').decode(data);
 }
 
@@ -462,6 +600,8 @@ export async function readSinaDisclosure(
       u.hostname,
     ) ||
     u.pathname !== '/corp/view/vCB_AllBulletinDetail.php' ||
+    u.searchParams.getAll('id').length !== 1 ||
+    u.searchParams.getAll('stockid').length !== 1 ||
     !/^\d+$/.test(u.searchParams.get('id') || '') ||
     !/^\d{6}$/.test(u.searchParams.get('stockid') || '')
   )
@@ -482,6 +622,8 @@ export async function readSinaDisclosure(
     kind: '正式披露',
     fetchedAt: new Date().toISOString(),
     excerpts,
+    disclosureType: disclosureType(sinaDisclosureTitle(html) || title),
+    htmlBodyComplete: blocks.join('').length >= 10_000,
   };
 }
 
@@ -505,11 +647,7 @@ async function sinaAnnualReport(listing: ListingOption, signal?: AbortSignal) {
       /<a[^>]+href=['"]([^'"]*vCB_AllBulletinDetail[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi,
     ),
   ];
-  const hit = links.find(
-    (x) =>
-      /年度报告/.test(stripHtml(x[2])) &&
-      !/摘要|董事|监事|英文/.test(stripHtml(x[2])),
-  );
+  const hit = links.find((x) => disclosureType(stripHtml(x[2])) === 'annual');
   if (!hit) return null;
   return readSinaDisclosure(
     new URL(hit[1].replace(/&amp;/g, '&'), indexUrl).href,
@@ -518,45 +656,7 @@ async function sinaAnnualReport(listing: ListingOption, signal?: AbortSignal) {
   );
 }
 
-const statementFields: Record<string, string[]> = {
-  lrb: [
-    '营业收入',
-    '营业总收入',
-    '营业成本',
-    '营业利润',
-    '归属于母公司所有者的净利润',
-    '归属于母公司股东的净利润',
-    '净利润',
-    '研发费用',
-    '财务费用',
-    '投资收益',
-    '资产减值损失',
-    '信用减值损失',
-    '基本每股收益',
-  ],
-  fzb: [
-    '货币资金',
-    '应收账款',
-    '存货',
-    '资产总计',
-    '负债合计',
-    '短期借款',
-    '长期借款',
-    '一年内到期的非流动负债',
-    '应付债券',
-    '在建工程',
-    '商誉',
-    '归属于母公司股东权益合计',
-  ],
-  llb: [
-    '经营活动产生的现金流量净额',
-    '购建固定资产、无形资产和其他长期资产支付的现金',
-    '购建固定资产、无形资产和其他长期资产所支付的现金',
-    '投资活动产生的现金流量净额',
-    '筹资活动产生的现金流量净额',
-    '期末现金及现金等价物余额',
-  ],
-};
+const statementFields = FINANCIAL_STATEMENT_FIELDS;
 export function parseFinancialPeriods(
   data: unknown,
   statement: string,
@@ -567,7 +667,13 @@ export function parseFinancialPeriods(
       data?: {
         report_list?: Record<
           string,
-          { data?: Array<{ item_title?: string; item_value?: unknown }> }
+          {
+            data?: Array<{
+              item_title?: string;
+              item_field?: string;
+              item_value?: unknown;
+            }>;
+          }
         >;
       };
     };
@@ -575,31 +681,42 @@ export function parseFinancialPeriods(
   return Object.entries(payload?.result?.data?.report_list || {})
     .filter(([p]) => /^\d{8}$/.test(p))
     .sort(([a], [b]) => b.localeCompare(a))
-    .slice(0, 8)
-    .map(([p, report]) => ({
-      period: `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6)}`,
-      statement,
-      sourceUrl,
-      currency: 'CNY',
-      unit: '元',
-      scope: '合并',
-      basis: statement === 'fzb' ? '期末余额' : '年初累计',
-      values: Object.fromEntries(
-        (report.data || [])
-          .filter(
-            (x) =>
-              statementFields[statement]?.includes(x.item_title || '') &&
-              (typeof x.item_value === 'number' ||
-                (typeof x.item_value === 'string' &&
-                  x.item_value.trim() !== '')) &&
-              Number.isFinite(Number(x.item_value)),
-          )
-          .map((x) => [
+    .slice(0, 28)
+    .map(([p, report]) => {
+      const items = (report.data || []).filter(
+        (x) =>
+          typeof x.item_title === 'string' &&
+          x.item_title.trim() !== '' &&
+          sinaFinancialField(statement, x.item_title, x.item_field) !== null &&
+          (typeof x.item_value === 'number' ||
+            (typeof x.item_value === 'string' && x.item_value.trim() !== '')) &&
+          Number.isFinite(Number(x.item_value)),
+      );
+      return {
+        period: `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6)}`,
+        statement,
+        sourceUrl,
+        currency: 'CNY',
+        unit: '元',
+        scope: '合并',
+        basis: statement === 'fzb' ? '期末余额' : '年初累计',
+        values: Object.fromEntries(
+          items.map((x) => [
             x.item_title!,
             `${Number(x.item_value)}${x.item_title === '基本每股收益' ? '元/股' : '元'}`,
           ]),
-      ),
-    }))
+        ),
+        fieldOrigins: Object.fromEntries(
+          items.map((x) => [
+            x.item_title!,
+            {
+              title: x.item_title!,
+              ...(x.item_field ? { sourceField: x.item_field } : {}),
+            },
+          ]),
+        ),
+      };
+    })
     .filter((x) => Object.keys(x.values).length);
 }
 async function financialHistory(listing: ListingOption, signal?: AbortSignal) {
@@ -616,7 +733,7 @@ async function financialHistory(listing: ListingOption, signal?: AbortSignal) {
         source: statement,
         type: '0',
         page: '1',
-        num: '8',
+        num: '28',
       }))
         u.searchParams.set(k, v);
       return parseFinancialPeriods(
@@ -717,13 +834,15 @@ async function collectResearchDossierWithinBudget(
     });
     return dossier;
   }
-  const [fin, news, annual, recent, annualHtml] = await Promise.allSettled([
-    financialHistory(listing, signal),
-    companyNews(listing, signal),
-    announcementList(listing, '年度报告', signal),
-    announcementList(listing, '', signal),
-    sinaAnnualReport(listing, signal),
-  ]);
+  const [fin, news, annual, recent, annualHtml, interim] =
+    await Promise.allSettled([
+      financialHistory(listing, signal),
+      companyNews(listing, signal),
+      announcementList(listing, '年度报告', signal),
+      announcementList(listing, '', signal),
+      sinaAnnualReport(listing, signal),
+      announcementList(listing, '半年度报告', signal),
+    ]);
   dossier.financialHistory = fin.status === 'fulfilled' ? fin.value : [];
   dossier.documents = news.status === 'fulfilled' ? news.value : [];
   if (annualHtml.status === 'fulfilled' && annualHtml.value) {
@@ -732,6 +851,13 @@ async function collectResearchDossierWithinBudget(
       source: annualHtml.value.title,
       status: '取得',
       detail: '通过新浪财报全文索引读取实际公告正文（HTML，非标题摘要）。',
+    });
+  } else {
+    dossier.attempts.push({
+      source: '新浪年报全文备用源',
+      status: '未取得',
+      detail:
+        '本轮未成功读取备用年报正文；不代表公司未披露，继续尝试正式披露 PDF。',
     });
   }
   dossier.attempts.push({
@@ -745,59 +871,57 @@ async function collectResearchDossierWithinBudget(
     status: newsCount ? '取得' : '未取得',
     detail: `${newsCount} 条有正文的资讯。`,
   });
-  let announcements = [
+  const announcements = [
     ...(annual.status === 'fulfilled' ? annual.value : []),
     ...(recent.status === 'fulfilled' ? recent.value : []),
+    ...(interim.status === 'fulfilled' ? interim.value : []),
   ];
-  if (!announcements.length)
-    announcements = signal?.aborted
-      ? []
-      : await announcementBackup(listing, signal).catch(() => []);
-  const unique = [
-    ...new Map(announcements.map((x) => [x.url, x])).values(),
-  ].sort((a, b) => b.date.localeCompare(a.date));
-  const isFullReport = (s: SourceLink) =>
-    /(?:年度|半年度)报告/.test(s.title) &&
-    !/摘要|取消|董事|监事|意见|提示|英文/.test(s.title);
-  const selected = [
-    !dossier.documents.some(
-      (x) => /年度报告/.test(x.title) && x.kind === '正式披露',
-    )
-      ? unique.find(
-          (x) =>
-            isFullReport(x) &&
-            /年度报告/.test(x.title) &&
-            !/半年度/.test(x.title),
-        )
-      : undefined,
-    unique.find((x) => isFullReport(x) && /半年度/.test(x.title)),
-    unique.find((x) => /投资者关系活动|调研活动|业绩说明/.test(x.title)),
-    unique.find((x) => /预告|关联交易|质押|减持|募集资金|处罚/.test(x.title)),
-  ].filter((x): x is SourceLink => !!x);
+  if (missingDisclosureKinds(announcements).length && !signal?.aborted)
+    announcements.push(
+      ...(await announcementBackup(listing, signal).catch(() => [])),
+    );
+  const selected = selectDisclosureSources(announcements, dossier.documents);
   for (const source of selected) {
-    if (signal?.aborted) break;
+    if (signal?.aborted) {
+      dossier.attempts.push({
+        source: source.title,
+        url: source.url,
+        date: source.date,
+        publisher: source.publisher,
+        status: '未取得',
+        detail:
+          '已找到披露文件，本阶段时间预算用尽，尚未读取正文；可在定向补采阶段重试。',
+      });
+      continue;
+    }
     try {
       const doc = await readResearchPdf(source, signal);
       dossier.documents.push(doc);
       dossier.attempts.push({
         source: source.title,
         status: '取得',
-        detail: `${doc.excerpts.length} 段原文（带 PDF 页码）`,
+        detail: `${doc.excerpts.length} 段原文（带 PDF 页码）；${doc.extraction?.pagesRead}/${doc.extraction?.totalPages} 页已读。${doc.extraction?.warnings.join(' ') || ''}${doc.disclosureType === 'summary' ? '实际文件为摘要，未取得全文。' : ''}`,
       });
-    } catch {
+    } catch (error) {
       dossier.attempts.push({
         source: source.title,
         status: '未取得',
-        detail:
-          '已找到披露文件但未能读取正文；交由定向联网补证，不能据标题作结论。',
+        url: source.url,
+        date: source.date,
+        publisher: source.publisher,
+        detail: `已找到披露文件但未能读取正文：${error instanceof Error ? error.message.replace(/https?:\/\/\S+/g, '[来源地址]').slice(0, 140) : '读取失败'}。不能据标题作结论。`,
       });
     }
   }
-  if (!dossier.documents.some((x) => isFullReport(x) && x.kind === '正式披露'))
+  for (const kind of missingDisclosureKinds(
+    announcements,
+    dossier.documents.filter((x) => x.kind === '正式披露'),
+  ))
     dossier.attempts.push({
-      source: '年报/半年报正文',
+      source: kind === 'annual' ? '最新年报正文' : '最新半年报正文',
       status: '未取得',
-      detail: '公告接口未返回完整定期报告，联网阶段优先补证。',
+      detail:
+        '本轮尚未成功读取完整定期报告正文；不代表公司未披露，联网阶段优先补证。',
     });
   dossier.documents.sort(
     (a, b) =>
@@ -837,7 +961,7 @@ export async function getResearchDossier(
   signal?: AbortSignal,
 ) {
   const snapshot = await getOrRefreshDataSnapshot({
-    cacheKey: `research-dossier:v5:${listing.id}`,
+    cacheKey: `research-dossier:v10:${listing.id}`,
     category: 'research-evidence',
     ttlMs: 6 * 60 * 60 * 1000,
     sourceName: '公司披露正文 · 财报三表 · 财经资讯',

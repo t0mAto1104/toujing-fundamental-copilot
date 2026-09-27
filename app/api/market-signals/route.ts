@@ -119,7 +119,13 @@ export async function GET(request: Request) {
         result = await getStockFlow(symbol, flowPeriod, request.signal);
         break;
       case 'boards':
-        result = await getBoardFlows(type, period, page, request.signal);
+        result = await getBoardFlows(
+          type,
+          period,
+          page,
+          request.signal,
+          params.get('refresh') === '1',
+        );
         break;
       case 'dragon':
         result = await getDragons(date, symbol, page, request.signal);

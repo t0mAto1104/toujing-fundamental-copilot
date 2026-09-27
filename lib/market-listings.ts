@@ -59,8 +59,9 @@ const exchangeNames: Record<string, string> = {
 };
 
 const beijingSecurity = /京A|北证A|北交所A股/;
+// Eastmoney labels STAR equities as 科创板 (JYS=23), not 沪A.
 const allowedSecurity =
-  /沪A|深A|京A|北证A|北交所A股|港股|美股|粉单|存托凭证|普通股/i;
+  /沪A|深A|^科创板$|京A|北证A|北交所A股|港股|美股|粉单|存托凭证|普通股/i;
 const blockedSecurity = /期货|期权|债|基金|指数|板块|可转债|优先股/i;
 const blockedName =
   /ETF|基金|期权|期货|可转债|债券|二倍做多|二倍做空|收益策略/i;

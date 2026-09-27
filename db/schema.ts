@@ -37,6 +37,8 @@ export const users = sqliteTable(
     dailyResearchUsed: integer('daily_research_used').notNull().default(0),
     dailyResearchDate: text('daily_research_date').notNull().default(''),
     allowedAiModels: text('allowed_ai_models').notNull().default(''),
+    preferredChatModel: text('preferred_chat_model'),
+    preferredResearchModel: text('preferred_research_model'),
     reportTokenLimit: integer('report_token_limit').notNull().default(80000),
     reportUsdLimit: real('report_usd_limit').notNull().default(2),
   },
@@ -92,6 +94,7 @@ export const aiUsageEvents = sqliteTable(
     userId: text('user_id').notNull(),
     endpoint: text('endpoint').notNull(),
     model: text('model').notNull(),
+    billingSource: text('billing_source'),
     inputTokens: integer('input_tokens').notNull().default(0),
     outputTokens: integer('output_tokens').notNull().default(0),
     reasoningTokens: integer('reasoning_tokens').notNull().default(0),
@@ -115,6 +118,15 @@ export const aiUsageEvents = sqliteTable(
   ],
 );
 
+// Only ciphertext and display metadata belong in D1. The wrapping key is a
+// separate server secret, never a database row or a client-visible setting.
+export const userAiCredentials = sqliteTable('user_ai_credentials', {
+  userId: text('user_id').primaryKey(),
+  encryptedKey: text('encrypted_key').notNull(),
+  keyLastFour: text('key_last_four').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const researchTasks = sqliteTable(
   'research_tasks',
   {
@@ -123,6 +135,7 @@ export const researchTasks = sqliteTable(
     batchId: text('batch_id'),
     query: text('query').notNull(),
     listingJson: text('listing_json').notNull(),
+    templateJson: text('template_json'),
     model: text('model').notNull(),
     frameworkVersion: text('framework_version').notNull(),
     pipelineVersion: text('pipeline_version').notNull().default(''),
@@ -206,3 +219,10 @@ export const reports = sqliteTable(
     index('idx_reports_user_updated_at').on(table.userId, table.updatedAt),
   ],
 );
+
+export const userNotebooks = sqliteTable('user_notebooks', {
+  userId: text('user_id').primaryKey(),
+  documentJson: text('document_json').notNull(),
+  revision: integer('revision').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});

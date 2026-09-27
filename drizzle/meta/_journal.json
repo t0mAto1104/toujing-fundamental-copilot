@@ -50,6 +50,34 @@
       "when": 1788803447432,
       "tag": "0006_research_task_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790002899288,
+      "tag": "0007_personal_ai_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790010415016,
+      "tag": "0008_user_model_preferences",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1790245708531,
+      "tag": "0009_custom_report_template",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1790455913274,
+      "tag": "0010_user_notebooks",
+      "breakpoints": true
     }
   ]
 }

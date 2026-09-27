@@ -91,12 +91,57 @@ const req = (method = 'GET', body?: unknown, id?: string) =>
     method,
     ...(body
       ? {
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://qa.invalid',
+          },
           body: JSON.stringify(body),
         }
       : {}),
   });
 const input = { query: '测试企业', listing, model: 'gpt-5.6-luna' };
+
+void test('custom template snapshots persist by task owner and normal tasks stay compatible', async () => {
+  const { defaultDraft } = await import('../lib/report-template');
+  login('custom-owner');
+  const context = await access.requireResearchAccess();
+  const template = defaultDraft();
+  template.blocks[0].requirement = '测试用户自定义要求';
+  const created = await task.createResearchTask(context, {
+    ...input,
+    reportTemplate: template,
+  });
+  assert.deepEqual(JSON.parse(created.template_json!), template);
+  const own = (await (
+    await routes.GET(req('GET', undefined, created.id))
+  ).json()) as any;
+  assert.deepEqual(own.task.reportTemplate, template);
+  const ordinary = await task.createResearchTask(context, input);
+  assert.equal(ordinary.template_json, null);
+  const invalid = { ...template, blocks: [] };
+  await assert.rejects(
+    task.createResearchTask(context, { ...input, reportTemplate: invalid }),
+  );
+  login('custom-other');
+  await access.requireResearchAccess();
+  assert.equal(
+    (await routes.GET(req('GET', undefined, created.id))).status,
+    404,
+  );
+  login(null);
+  assert.equal(
+    (
+      await routes.POST(
+        req('POST', {
+          items: [{ query: '测试企业' }],
+          reportTemplate: template,
+          confirmed: true,
+        }),
+      )
+    ).status,
+    401,
+  );
+});
 
 void test('task API is login-gated and GET never starts research', async () => {
   login(null);
@@ -131,8 +176,8 @@ void test('leases enforce user/global concurrency and quota is consumed once acr
   const lease = await task.claimResearchTask('lease-user', a.id);
   await assert.rejects(task.claimResearchTask('lease-user', a.id));
   await assert.rejects(task.claimResearchTask('lease-user', b.id));
-  await access.consumeDailyResearchQuota(context, a.id, lease);
-  await access.consumeDailyResearchQuota(context, a.id, lease);
+  await access.recordResearchUsage(context, a.id, lease);
+  await access.recordResearchUsage(context, a.id, lease);
   assert.equal(
     sqlite
       .prepare('SELECT daily_research_used AS n FROM users WHERE id=?')
@@ -140,7 +185,7 @@ void test('leases enforce user/global concurrency and quota is consumed once acr
     1,
   );
   await assert.rejects(
-    access.consumeDailyResearchQuota(context, a.id, 'wrong-lease'),
+    access.recordResearchUsage(context, a.id, 'wrong-lease'),
   );
   await task.finishResearchTask(
     'lease-user',
@@ -150,7 +195,7 @@ void test('leases enforce user/global concurrency and quota is consumed once acr
     'offline failure',
   );
   const resumed = await task.claimResearchTask('lease-user', a.id);
-  await access.consumeDailyResearchQuota(context, a.id, resumed);
+  await access.recordResearchUsage(context, a.id, resumed);
   assert.equal(
     sqlite
       .prepare('SELECT daily_research_used AS n FROM users WHERE id=?')
@@ -365,6 +410,201 @@ void test('cancel clears expired leases and late writers cannot resurrect a canc
     task.finishResearchTask('cancel-user', created.id, lease, 'completed'),
   );
   await assert.rejects(task.claimResearchTask('cancel-user', created.id));
+});
+
+void test('live leases renew, but a crashed worker expires without blocking another task for ten minutes', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  login('crashed-worker');
+  const context = await access.requireResearchAccess();
+  const old = await task.createResearchTask(context, input);
+  const next = await task.createResearchTask(context, input);
+  const lease = await task.claimResearchTask('crashed-worker', old.id);
+  const start = Date.now();
+  const deadline = start + task.TASK_RUNTIME_MS;
+  t.mock.timers.tick(30_000);
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'crashed-worker',
+      old.id,
+      lease,
+      deadline,
+    ),
+    true,
+  );
+  assert.equal(
+    Date.parse(
+      (await task.getResearchTask('crashed-worker', old.id))!.lease_expires_at!,
+    ),
+    Date.now() + task.TASK_LEASE_MS,
+  );
+  await assert.rejects(task.claimResearchTask('crashed-worker', next.id), {
+    code: 'user_task_running',
+  });
+  t.mock.timers.tick(task.TASK_LEASE_MS);
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'crashed-worker',
+      old.id,
+      lease,
+      deadline,
+    ),
+    false,
+  );
+  const view = task.serializeTask(
+    (await task.getResearchTask('crashed-worker', old.id))!,
+  );
+  assert.equal(view.status, 'interrupted');
+  assert.match(view.message, /名额已释放/);
+  const progress = await routes.GET(
+    new Request(
+      `https://qa.invalid/api/research-tasks?id=${old.id}&progress=1`,
+    ),
+  );
+  assert.equal(((await progress.json()) as any).task.status, 'interrupted');
+  await assert.rejects(
+    task.updateTaskProgress('crashed-worker', old.id, lease, 'write', 'late'),
+    { code: 'task_lease_lost' },
+  );
+  await assert.rejects(
+    task.finishResearchTask('crashed-worker', old.id, lease, 'completed'),
+  );
+  const nextLease = await task.claimResearchTask('crashed-worker', next.id);
+  // Failure cleanup may release only its own expired token, never a newer run.
+  await task.finishResearchTask('crashed-worker', old.id, lease, 'interrupted');
+  assert.equal(
+    (await task.getResearchTask('crashed-worker', next.id))!.lease_id,
+    nextLease,
+  );
+  await task.finishResearchTask('crashed-worker', next.id, nextLease, 'failed');
+});
+
+void test('stopping has bounded grace, repeated clicks cannot extend it, and no further paid calls are admitted', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  login('live-cancel');
+  const context = await access.requireResearchAccess();
+  const old = await task.createResearchTask(context, input);
+  const next = await task.createResearchTask(context, input);
+  const lease = await task.claimResearchTask('live-cancel', old.id);
+  // Include a legacy ten-minute lease left behind by a previously deployed worker.
+  sqlite
+    .prepare('UPDATE research_tasks SET lease_expires_at=? WHERE id=?')
+    .run(new Date(Date.now() + task.TASK_RUNTIME_MS).toISOString(), old.id);
+  await routes.PATCH(req('PATCH', { id: old.id, action: 'cancel' }));
+  const stopAt = (await task.getResearchTask('live-cancel', old.id))!
+    .lease_expires_at!;
+  assert.equal(Date.parse(stopAt), Date.now() + task.TASK_CANCEL_GRACE_MS);
+  await assert.rejects(task.claimResearchTask('live-cancel', next.id), {
+    code: 'task_stopping',
+  });
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'live-cancel',
+      old.id,
+      lease,
+      Date.now() + task.TASK_RUNTIME_MS,
+    ),
+    false,
+  );
+  await assert.rejects(
+    task.reserveResearchCall({
+      userId: 'live-cancel',
+      taskId: old.id,
+      leaseId: lease,
+      model: input.model,
+      text: 'offline',
+      output: 100,
+      searches: 0,
+    }),
+  );
+  await assert.rejects(
+    task.finishResearchTask('live-cancel', old.id, lease, 'completed'),
+  );
+  t.mock.timers.tick(5000);
+  await routes.PATCH(req('PATCH', { id: old.id, action: 'cancel' }));
+  assert.equal(
+    (await task.getResearchTask('live-cancel', old.id))!.lease_expires_at,
+    stopAt,
+  );
+  t.mock.timers.tick(task.TASK_CANCEL_GRACE_MS);
+  assert.equal(
+    task.serializeTask((await task.getResearchTask('live-cancel', old.id))!)
+      .status,
+    'cancelled',
+  );
+  const nextLease = await task.claimResearchTask('live-cancel', next.id);
+  await assert.rejects(task.claimResearchTask('live-cancel', old.id), {
+    code: 'task_cancelled',
+  });
+  await task.finishResearchTask('live-cancel', old.id, lease, 'interrupted');
+  assert.equal(
+    (await task.getResearchTask('live-cancel', old.id))!.status,
+    'cancelled',
+  );
+  await task.finishResearchTask('live-cancel', next.id, nextLease, 'failed');
+});
+
+void test('lease renewal respects its owner, token and hard runtime deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  login('renew-owner');
+  const created = await task.createResearchTask(
+    await access.requireResearchAccess(),
+    input,
+  );
+  const lease = await task.claimResearchTask('renew-owner', created.id);
+  const deadline = Date.now() + 20_000;
+  assert.equal(
+    await task.renewResearchTaskLease('other', created.id, lease, deadline),
+    false,
+  );
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'renew-owner',
+      created.id,
+      'wrong',
+      deadline,
+    ),
+    false,
+  );
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'renew-owner',
+      created.id,
+      lease,
+      deadline,
+    ),
+    true,
+  );
+  assert.equal(
+    Date.parse(
+      (await task.getResearchTask('renew-owner', created.id))!
+        .lease_expires_at!,
+    ),
+    deadline,
+  );
+  t.mock.timers.tick(20_000);
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'renew-owner',
+      created.id,
+      lease,
+      deadline,
+    ),
+    false,
+  );
+  const replaced = await task.claimResearchTask('renew-owner', created.id);
+  assert.equal(
+    await task.renewResearchTaskLease(
+      'renew-owner',
+      created.id,
+      lease,
+      deadline + 20_000,
+    ),
+    false,
+  );
+  await assert.rejects(
+    task.finishResearchTask('renew-owner', created.id, lease, 'failed'),
+  );
+  await task.finishResearchTask('renew-owner', created.id, replaced, 'failed');
 });
 
 void test('batch creation is all-or-none at the queued cap and does not consume quota', async () => {

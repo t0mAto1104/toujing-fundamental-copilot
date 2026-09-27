@@ -1,0 +1,300 @@
+.notebook-entry {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color 150ms,
+    border-color 150ms;
+}
+.notebook-entry:hover,
+.notebook-entry[aria-expanded='true'] {
+  background: var(--card);
+  border-color: var(--border);
+  color: var(--foreground);
+}
+.notebook-window {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  max-width: none;
+  max-height: none;
+  position: fixed;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  isolation: isolate;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow:
+    0 16px 64px #0005,
+    0 2px 8px #0003;
+  overflow: hidden;
+}
+.notebook-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 46px;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.notebook-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.notebook-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.notebook-icon:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.notebook-icon:active,
+.notebook-entry:active {
+  background: var(--accent);
+}
+.notebook-icon:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.notebook-icon:focus-visible,
+.notebook-entry:focus-visible,
+.notebook-window button:focus-visible,
+.notebook-window a:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.notebook-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-right: auto;
+  padding: 6px 2px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.notebook-drag {
+  touch-action: none;
+  cursor: grab;
+}
+.notebook-drag:active {
+  cursor: grabbing;
+}
+.notebook-save-state {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  color: var(--muted-foreground);
+}
+.notebook-save-state svg {
+  width: 14px;
+  height: 14px;
+}
+.notebook-minimized {
+  overflow: visible;
+}
+.notebook-minimized .notebook-titlebar {
+  border: 0;
+  min-height: 0;
+  height: 100%;
+  padding-block: 1px;
+}
+.notebook-resize {
+  position: absolute;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  touch-action: none;
+  z-index: 3;
+}
+.notebook-resize:hover,
+.notebook-resize:focus-visible {
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.notebook-resize[data-resize-edge='n'],
+.notebook-resize[data-resize-edge='s'] {
+  left: 16px;
+  right: 16px;
+  height: 7px;
+  cursor: ns-resize;
+}
+.notebook-resize[data-resize-edge='e'],
+.notebook-resize[data-resize-edge='w'] {
+  top: 16px;
+  bottom: 16px;
+  width: 7px;
+  cursor: ew-resize;
+}
+.notebook-resize[data-resize-edge='ne'],
+.notebook-resize[data-resize-edge='nw'],
+.notebook-resize[data-resize-edge='se'],
+.notebook-resize[data-resize-edge='sw'] {
+  width: 16px;
+  height: 16px;
+}
+.notebook-resize[data-resize-edge*='n'] {
+  top: 0;
+}
+.notebook-resize[data-resize-edge*='s'] {
+  bottom: 0;
+}
+.notebook-resize[data-resize-edge*='e'] {
+  right: 0;
+}
+.notebook-resize[data-resize-edge*='w'] {
+  left: 0;
+}
+.notebook-resize[data-resize-edge='nw'],
+.notebook-resize[data-resize-edge='se'] {
+  cursor: nwse-resize;
+}
+.notebook-resize[data-resize-edge='ne'],
+.notebook-resize[data-resize-edge='sw'] {
+  cursor: nesw-resize;
+}
+.notebook-positions,
+.notebook-export-options {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 4px 8px;
+  gap: 3px;
+  border-bottom: 1px solid var(--border);
+  background: var(--popover);
+  flex-shrink: 0;
+}
+.notebook-minimized .notebook-positions {
+  position: absolute;
+  top: 48px;
+  left: 0;
+  width: 230px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px #0004;
+}
+.notebook-export-options {
+  justify-content: flex-end;
+}
+.notebook-export-options button,
+.notebook-feedback button {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.notebook-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  background: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.notebook-feedback > div {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.notebook-signin {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 14px;
+}
+.notebook-signin svg {
+  width: 20px;
+}
+.notebook-signin a {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.notebook-confirm {
+  max-width: 340px !important;
+  z-index: 80 !important;
+}
+.notebook-close-actions {
+  display: grid;
+  gap: 8px;
+}
+.notebook-close-actions > button {
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.notebook-close-actions > button:first-child {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+.notebook-close-actions > .notebook-discard {
+  color: var(--destructive);
+}
+.notebook-close-actions > button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+@media (pointer: coarse) {
+  .notebook-entry {
+    width: 44px;
+    height: 44px;
+  }
+  .notebook-icon {
+    width: 38px;
+    height: 44px;
+  }
+  .notebook-titlebar {
+    min-height: 48px;
+  }
+  .notebook-resize[data-resize-edge='n'],
+  .notebook-resize[data-resize-edge='s'] {
+    height: 10px;
+  }
+  .notebook-resize[data-resize-edge='e'],
+  .notebook-resize[data-resize-edge='w'] {
+    width: 10px;
+  }
+  .notebook-positions .notebook-icon {
+    width: 44px;
+  }
+  .notebook-export-options button,
+  .notebook-feedback button {
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notebook-entry,
+  .notebook-icon {
+    transition: none;
+  }
+  .notebook-save-state .animate-spin {
+    animation: none;
+  }
+}

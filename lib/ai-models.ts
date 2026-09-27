@@ -1,6 +1,3 @@
-export const AI_MODEL_STORAGE_KEY = 'lens-ai-model-v2';
-export const AI_MODEL_CHANGE_EVENT = 'lens-ai-model-change';
-
 export const AI_MODELS = [
   {
     id: 'gpt-5.4-mini',
@@ -32,7 +29,6 @@ export type AIModelId = (typeof AI_MODELS)[number]['id'];
 export const DEFAULT_AI_MODEL: AIModelId = 'gpt-5.6-luna';
 // Deep company reports have an independent preference; market chat stays cheap.
 export const DEFAULT_RESEARCH_MODEL: AIModelId = 'gpt-5.6-sol';
-export const RESEARCH_MODEL_STORAGE_KEY = 'lens-research-model-v1';
 
 export function defaultResearchModel(allowed: readonly AIModelId[]): AIModelId {
   return allowed.includes(DEFAULT_RESEARCH_MODEL)
@@ -42,20 +38,23 @@ export function defaultResearchModel(allowed: readonly AIModelId[]): AIModelId {
       : allowed[0] || DEFAULT_RESEARCH_MODEL;
 }
 
-// Undefined deliberately delegates the default to the server's current policy.
-export function getPreferredResearchModel(
-  allowed?: readonly AIModelId[],
-): AIModelId | undefined {
-  if (typeof window === 'undefined') return undefined;
-  const stored = window.localStorage.getItem(RESEARCH_MODEL_STORAGE_KEY);
-  return isAIModelId(stored) && (!allowed || allowed.includes(stored))
-    ? stored
-    : undefined;
-}
-
-export function setPreferredResearchModel(model: AIModelId) {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(RESEARCH_MODEL_STORAGE_KEY, model);
+export function resolveModelPreferences(
+  allowed: readonly AIModelId[],
+  chat: unknown,
+  research: unknown,
+) {
+  return {
+    preferredChatModel:
+      isAIModelId(chat) && allowed.includes(chat)
+        ? chat
+        : allowed.includes(DEFAULT_AI_MODEL)
+          ? DEFAULT_AI_MODEL
+          : allowed[0] || DEFAULT_AI_MODEL,
+    preferredResearchModel:
+      isAIModelId(research) && allowed.includes(research)
+        ? research
+        : defaultResearchModel(allowed),
+  };
 }
 
 export function isAIModelId(value: unknown): value is AIModelId {
@@ -77,19 +76,6 @@ export function parseAllowedAIModels(value: unknown): AIModelId[] {
   } catch {
     return AI_MODELS.map((model) => model.id);
   }
-}
-
-export function getPreferredAIModel(): AIModelId {
-  if (typeof window === 'undefined') return DEFAULT_AI_MODEL;
-  return resolveAIModel(window.localStorage.getItem(AI_MODEL_STORAGE_KEY));
-}
-
-export function setPreferredAIModel(model: AIModelId) {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(AI_MODEL_STORAGE_KEY, model);
-  window.dispatchEvent(
-    new CustomEvent(AI_MODEL_CHANGE_EVENT, { detail: model }),
-  );
 }
 
 export function reasoningEffortForModel(model: AIModelId): 'none' | 'low' {

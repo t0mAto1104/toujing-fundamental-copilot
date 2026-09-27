@@ -7,6 +7,8 @@ import {
 import { readDataSnapshot, storeDataSnapshot } from '@/lib/data-snapshot-cache';
 import { observeDataSource } from '@/lib/data-source-health';
 import { requestDeadline } from '@/lib/request-deadline';
+import { getCachedTradingSession } from '@/lib/a-stock-official';
+import { marketDataFreshness } from '@/lib/market-data-freshness';
 import type { IndustrySnapshot } from '@/lib/a-stock-industries';
 import {
   checkedDate,
@@ -56,6 +58,7 @@ async function cached<T>(
   refresh: (signal: AbortSignal) => Promise<T>,
   parent?: AbortSignal,
   refreshTimeoutMs = 18_000,
+  forceRefresh = false,
 ): Promise<SignalSnapshot<T>> {
   const cacheKey = `signals:v1:${key}`;
   const observation = {
@@ -78,7 +81,13 @@ async function cached<T>(
       ? { notice: '刷新暂不可用，保留上次数据；请核对数据日期。' }
       : {}),
   });
-  if (previous && !previous.stale) {
+  // Manual refresh bypasses the TTL, not provider cooldowns; a 15s shared
+  // floor prevents refresh-button request storms.
+  if (
+    previous &&
+    !previous.stale &&
+    (!forceRefresh || Date.now() - Date.parse(previous.fetchedAt) < 15_000)
+  ) {
     await observeDataSource(observation, 'cache');
     return wrap(previous);
   }
@@ -465,15 +474,16 @@ export function parseBoardFlow(
   };
 }
 
-export function getBoardFlows(
+export async function getBoardFlows(
   kind: BoardKind,
   period: BoardPeriod,
   page: number,
   signal?: AbortSignal,
+  forceRefresh = false,
 ) {
-  return cached<Paged<BoardFlow>>(
+  const result = await cached<Paged<BoardFlow>>(
     `boards:${kind}:${period}:${page}`,
-    5 * 60_000,
+    60_000,
     '东方财富板块资金',
     'https://data.eastmoney.com/bkzj/',
     async (s) => {
@@ -492,13 +502,26 @@ export function getBoardFlows(
         },
         s,
       );
-      const items = diff(data.diff)
-        .filter((r) => /^BK\d{4,6}$/.test(text(r.f12)))
-        .map((r) => parseBoardFlow(r, kind, period));
+      const validRows = diff(data.diff).filter((r) =>
+        /^BK\d{4,6}$/.test(text(r.f12)),
+      );
+      const items = validRows.map((r) => parseBoardFlow(r, kind, period));
       const total = num(data.total);
       if (total == null || (!items.length && total > (page - 1) * 50))
         throw new Error('板块资金分页数据异常。');
-      const timestamp = num(diff(data.diff)[0]?.f124);
+      const timestamps = validRows
+        .map((row) => num(row.f124))
+        .filter(
+          (time): time is number =>
+            time !== null &&
+            time >= Date.UTC(2000, 0, 1) / 1000 &&
+            time * 1000 <= Date.now() + 60_000,
+        );
+      // A fresh first row must not conceal an older board in this page.
+      const timestamp =
+        timestamps.length === items.length && timestamps.length
+          ? Math.min(...timestamps)
+          : null;
       return {
         items,
         total,
@@ -508,7 +531,18 @@ export function getBoardFlows(
       };
     },
     signal,
+    18_000,
+    forceRefresh,
   );
+  const freshness = marketDataFreshness(
+    result.data.date,
+    await getCachedTradingSession(signal),
+  );
+  return {
+    ...result,
+    stale: result.stale || freshness.stale,
+    notice: result.notice || freshness.notice,
+  };
 }
 
 type DataPage = { rows: Raw[]; count: number; pages: number };

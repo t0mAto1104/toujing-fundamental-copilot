@@ -440,7 +440,7 @@ void test('a partial Beijing fallback cannot erase cached Shanghai quotes', asyn
     'sh600123',
   ]);
   await storeDataSnapshot(
-    'market-quotes:v3:bj920021,sh600123',
+    'market-quotes:v4:bj920021,sh600123',
     'market-quotes',
     old,
     -1,

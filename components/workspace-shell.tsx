@@ -1,8 +1,10 @@
 /* oxlint-disable next/no-html-link-for-pages -- hosted RSC client transitions can be swallowed; full navigation is required. */
 
-import { Bell, Plus } from 'lucide-react';
+import { Plus } from 'lucide-react';
+import { NotebookButton } from '@/components/notebook-button';
 import type { ReactNode } from 'react';
 import { BrandMark } from '@/components/brand-mark';
+import { MobileWorkspaceNav } from '@/components/mobile-workspace-nav';
 
 import { buttonVariants } from '@/components/ui/button';
 import {
@@ -21,12 +23,13 @@ export function WorkspaceShell({
   headerSearch?: ReactNode;
 }) {
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-30 border-b border-border bg-background/88 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-[1500px] items-center gap-5 px-4 sm:px-6 lg:px-8">
+    <main className="workspace-shell min-h-screen bg-background text-foreground">
+      <header className="workspace-header sticky top-0 z-30 border-b border-border bg-background/88 backdrop-blur-xl">
+        <div className="workspace-header-inner mx-auto flex h-16 max-w-[1500px] items-center gap-2 px-4 sm:gap-5 sm:px-6 lg:px-8">
+          <MobileWorkspaceNav active={active} />
           <a
             href="/"
-            className="flex shrink-0 items-center gap-2.5"
+            className="workspace-brand flex shrink-0 items-center gap-2.5"
             aria-label="返回透镜首页"
           >
             <BrandMark />
@@ -36,14 +39,8 @@ export function WorkspaceShell({
             </span>
           </a>
           {headerSearch}
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              className="grid size-9 place-items-center rounded-xl border border-transparent text-muted-foreground hover:border-border hover:bg-card"
-              aria-label="通知"
-            >
-              <Bell className="size-4" />
-            </button>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <NotebookButton />
             <a
               href="/research"
               className={cn(buttonVariants({ size: 'sm' }), 'rounded-xl px-4')}
@@ -54,11 +51,11 @@ export function WorkspaceShell({
           </div>
         </div>
       </header>
-      <div className="mx-auto grid max-w-[1500px] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
-        <aside className="sticky top-16 hidden h-[calc(100vh-64px)] self-start overflow-y-auto border-r border-border bg-sidebar/55 px-5 py-6 lg:flex lg:flex-col [scrollbar-width:thin]">
+      <div className="workspace-grid mx-auto grid max-w-[1500px] grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="workspace-sidebar sticky top-16 hidden h-[calc(100vh-64px)] self-start overflow-y-auto border-r border-border bg-sidebar/55 px-5 py-6 lg:flex lg:flex-col [scrollbar-width:thin]">
           <WorkspaceNav active={active} />
         </aside>
-        <section className="min-w-0 px-4 py-7 sm:px-6 lg:px-8 lg:py-8">
+        <section className="workspace-content min-w-0 px-4 py-7 sm:px-6 lg:px-8 lg:py-8">
           {children}
         </section>
       </div>

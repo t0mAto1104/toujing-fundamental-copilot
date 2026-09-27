@@ -78,6 +78,8 @@ export const deepResearchSchema = object({
     maxItems: 5,
     items: object({
       company: text,
+      selectionReason: text,
+      evidencePeriod: text,
       business: text,
       position: text,
       comparison: text,
@@ -155,7 +157,7 @@ export const COMPANY_RESEARCH_INSTRUCTIONS = `你是严谨的中文公司基本�
 深度标准：
 - businessSegments按真实分部列收入、占比、同比、毛利率、产品、利润驱动和商业化阶段；“收入基本盘/利润引擎/早期业务”要解释依据。证据未披露的字段写“未取得”，不能捏造，也不能因一个字段缺失删掉整个真实业务。
 - operatingDrivers逐业务列核心量价成本/产能客户等变量：已知基准（期间、单位）→行业/政策变化→公司收入/毛利/现金流→失效条件。规划产能、建成产能、实际产量、销量严格区分。
-- peerComparison给真实可比公司和竞合关系，说明认证、技术、成本、规模或转换成本；不同产品/会计期间不可硬比。没有可比数字仍可基于证据进行定性比较。
+- peerComparison给真实具名可比公司和竞合关系。selectionReason写基于来源的入选理由（产品、客户、盈利模式的重合），evidencePeriod注明证据期间；business写具体业务，comparison写差异，limitation写不可比及应排除项。行业归属/市值相近只能产生候选，不足以证明业务可比。只在证据确实支持两家公司业务比较时纳入，不为凑数填满表；无资料留空。不同产品/会计期间不可硬比，没有同口径数字可做有依据的定性比较。
 - strategicInvestments单独分析本轮披露的联营/合营及关键新业务主体：名称、精确持股比例、并表或权益法、最新和上一年投资损益、商业化阶段及协同是否兑现。不存在依据则留空；已有资料不许省略。投资收益总额、全部联营按持股比例损益、单家企业净利润是三个口径，不可互换。
 - governanceFindings按已取得资料列关联采购实际发生额与批准额度、质押/担保实际余额与额度、募投及合规事实，不能将已读的关联交易或受限资金说成未取得。处罚没有查到只说明检索边界，不等于没有处罚。
 - financialTrend优先最近完整年度、上一年度、最新中报/季报和上年同期，明确累计口径；比较收入、归母利润、经营现金流和债务现金，解释改善来自量价、成本还是非经常性项目。联营损益不是子公司合并收入。

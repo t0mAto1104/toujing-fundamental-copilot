@@ -6,6 +6,8 @@ import {
 import { abortable, requestDeadline } from '@/lib/request-deadline';
 import { getBseQuote } from '@/lib/a-stock-bse';
 import { getCachedTradingSession } from '@/lib/a-stock-official';
+import { checkedDate, shiftDate } from '@/lib/signal-types';
+import { uniqueRows } from '@/lib/source-validation';
 import { quoteDateStale } from '@/lib/official-data-types';
 import {
   isMarketIndex,
@@ -20,6 +22,16 @@ import {
 } from '@/lib/quote-types';
 
 const headers = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://gu.qq.com/' };
+
+// Tencent STAR cumulative quotes and candles are shares; book/ticks are already lots.
+// Verified against Sina shares and turnover on 2026-09-25. Never apply to book/ticks.
+export function tencentVolumeLots(symbol: string, value: number | null) {
+  return value === null
+    ? null
+    : /^sh68\d{4}$/.test(symbol)
+      ? value / 100
+      : value;
+}
 
 function number(value: unknown): number | null {
   if (typeof value !== 'number' && typeof value !== 'string') return null;
@@ -109,7 +121,7 @@ export function parseTencentQuotes(
       low: number(row[34]),
       change: number(row[31]),
       percent: number(row[32]),
-      volume: nonnegative(row[6]),
+      volume: tencentVolumeLots(symbol, nonnegative(row[6])),
       amount: amountWan === null ? null : amountWan * 10_000,
       turnover: isMarketIndex(symbol) ? null : nonnegative(row[38]),
       pe,
@@ -137,7 +149,7 @@ export async function getMarketQuotes(
     const sessionTask = getCachedTradingSession(deadline.signal);
     const snapshot = await abortable(
       getOrRefreshDataSnapshot({
-        cacheKey: `market-quotes:v3:${sorted.join(',')}`,
+        cacheKey: `market-quotes:v4:${sorted.join(',')}`,
         category: 'market-quotes',
         ttlMs: 15_000,
         sourceName: '腾讯行情',
@@ -190,7 +202,7 @@ export async function getMarketQuotes(
           if (!quotes.length) throw new Error('行情源未返回有效报价');
           if (quotes.length < sorted.length) {
             const previous = await readDataSnapshot<MarketQuote[]>(
-              `market-quotes:v3:${sorted.join(',')}`,
+              `market-quotes:v4:${sorted.join(',')}`,
             ).catch(() => null);
             quotes.push(
               ...(previous?.value || [])
@@ -229,6 +241,7 @@ export async function getMarketQuotes(
 export function parseKlineRows(
   rows: unknown,
   provider: 'tencent' | 'eastmoney',
+  symbol = '',
 ): KlineBar[] {
   if (!Array.isArray(rows)) return [];
   const bars = new Map<number, KlineBar>();
@@ -254,7 +267,10 @@ export function parseKlineRows(
       close: close!,
       high: high!,
       low: low!,
-      volume: nonnegative(row[5]),
+      volume:
+        provider === 'tencent'
+          ? tencentVolumeLots(symbol, nonnegative(row[5]))
+          : nonnegative(row[5]),
       // Tencent minute field 7 is turnover basis points, NOT turnover amount.
       amount: provider === 'eastmoney' ? nonnegative(row[6]) : null,
     });
@@ -267,27 +283,135 @@ type KlinePacket = Pick<
   'bars' | 'sourceName' | 'sourceUrl' | 'notice'
 >;
 
+const klineHosts = [
+  'https://web.ifzq.gtimg.cn',
+  'https://proxy.finance.qq.com/ifzqgtimg',
+  'https://ifzq.gtimg.cn',
+];
+const klineCooldown = new Map<string, number>();
+
+async function tencentBars(
+  symbol: string,
+  period: KlinePeriod,
+  adjustment: PriceAdjustment,
+  signal: AbortSignal,
+  from = '',
+  to = '',
+) {
+  if (symbol.startsWith('bj')) throw new Error('腾讯不提供北交所完整历史 K 线');
+  const minute = /^m\d/.test(period),
+    adjust = adjustment === 'none' ? '' : adjustment;
+  if (minute && adjustment !== 'none') throw new Error('分钟 K 线只支持不复权');
+  const path = minute
+    ? '/appstock/app/kline/mkline'
+    : '/appstock/app/fqkline/get';
+  const param = minute
+    ? `${symbol},${period},,320`
+    : `${symbol},${period},${from},${to},640,${adjust}`;
+  for (const host of klineHosts) {
+    signal.throwIfAborted();
+    if ((klineCooldown.get(host) ?? 0) > Date.now()) continue;
+    let payload: {
+      code?: number;
+      data?: Record<string, Record<string, unknown>>;
+    };
+    try {
+      payload = await fetchJson(
+        `${host}${path}?param=${param}`,
+        { headers, signal },
+        1800,
+      );
+    } catch {
+      signal.throwIfAborted();
+      // Transport/invalid JSON is an endpoint fault; symbol-specific emptiness is not.
+      klineCooldown.set(host, Date.now() + 120_000);
+      continue;
+    }
+    try {
+      const data = payload?.data?.[symbol];
+      const key = `${adjust}${period}`;
+      // Some indices/new listings have only an unadjusted key. An explicitly empty
+      // adjusted series must NOT be replaced with another adjustment basis.
+      const raw = data && Object.hasOwn(data, key) ? data[key] : data?.[period];
+      if (payload?.code !== 0 || !Array.isArray(raw) || (!raw.length && !from))
+        throw new Error('腾讯缺少目标证券所选周期或复权数据');
+      const bars = parseKlineRows(raw, 'tencent', symbol);
+      if (bars.length !== raw.length || bars.some((b) => b.volume === null))
+        throw new Error('腾讯 K 线存在无效数值或重复时间');
+      if (from && bars.some((b) => b.date < from || b.date > to))
+        throw new Error('腾讯 K 线返回区间之外的数据');
+      return {
+        bars,
+        sourceName: '腾讯行情',
+        sourceUrl: `${host}${path}?param=${param}`,
+      };
+    } catch {
+      signal.throwIfAborted();
+      // A delisted/new/unsupported symbol must not block every other security.
+    }
+  }
+  throw new Error('腾讯未返回该证券所选区间的有效 K 线');
+}
+
 async function tencentKline(
   symbol: string,
   period: KlinePeriod,
   adjustment: PriceAdjustment,
   signal: AbortSignal,
 ): Promise<KlinePacket> {
-  const minute = /^m\d/.test(period);
-  const adjust = adjustment === 'none' ? '' : adjustment;
-  const url = minute
-    ? `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${symbol},${period},,320`
-    : `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${symbol},${period},,,600,${adjust}`;
-  const payload = await fetchJson<{
-    code?: number;
-    data?: Record<string, Record<string, unknown>>;
-  }>(url, { headers, signal }, 4_500);
-  if (payload.code !== 0) throw new Error('腾讯 K 线暂不可用');
-  const data = payload.data?.[symbol];
-  // Never pass raw bars off as adjusted. If qfq/hfq is absent, request the backup.
-  const bars = parseKlineRows(data?.[`${adjust}${period}`], 'tencent');
-  if (!bars.length) throw new Error('腾讯缺少该周期或复权数据');
-  return { bars, sourceName: '腾讯行情', sourceUrl: quoteSourceUrl(symbol) };
+  return tencentBars(symbol, period, adjustment, signal);
+}
+
+export async function getDailyHistory(
+  symbol: string,
+  from: string,
+  to: string,
+  signal?: AbortSignal,
+): Promise<KlinePacket> {
+  checkedDate(from);
+  checkedDate(to);
+  if (from > to || (Date.parse(to) - Date.parse(from)) / 86400000 > 1826)
+    throw new Error('历史区间最多五年');
+  const deadline = requestDeadline(14_000, signal);
+  try {
+    const bars: KlineBar[] = [];
+    let sourceUrl = quoteSourceUrl(symbol);
+    for (let cursor = from; cursor <= to;) {
+      const end = shiftDate(cursor, 699) < to ? shiftDate(cursor, 699) : to;
+      const chunk = await tencentBars(
+        symbol,
+        'day',
+        'qfq',
+        deadline.signal,
+        cursor,
+        end,
+      );
+      bars.push(...chunk.bars);
+      sourceUrl = chunk.sourceUrl;
+      cursor = shiftDate(end, 1);
+    }
+    uniqueRows(bars, (b) => String(b.time));
+    if (!bars.length) throw new Error('所选区间无有效 K 线');
+    return {
+      bars: bars.sort((a, b) => a.time - b.time),
+      sourceName: '腾讯行情',
+      sourceUrl,
+    };
+  } catch {
+    deadline.signal.throwIfAborted();
+    const fallback = await eastmoneyKline(
+      symbol,
+      'day',
+      'qfq',
+      deadline.signal,
+    );
+    return {
+      ...fallback,
+      notice: '区间主源不可用，采用备用源实际覆盖的历史范围。',
+    };
+  } finally {
+    deadline.dispose();
+  }
 }
 
 async function eastmoneyKline(
@@ -331,7 +455,8 @@ async function eastmoneyKline(
   )
     throw new Error('备用 K 线源未返回目标证券');
   const bars = parseKlineRows(payload.data.klines, 'eastmoney');
-  if (!bars.length) throw new Error('备用 K 线源暂无有效数据');
+  if (!bars.length || bars.length !== payload.data.klines?.length)
+    throw new Error('备用 K 线源存在无效或重复记录');
   return {
     bars,
     sourceName: '东方财富行情',
@@ -349,7 +474,7 @@ export async function getMarketKline(
   try {
     const snapshot = await abortable(
       getOrRefreshDataSnapshot<KlinePacket>({
-        cacheKey: `market-kline:v1:${symbol}:${period}:${adjustment}`,
+        cacheKey: `market-kline:v2:${symbol}:${period}:${adjustment}`,
         category: 'market-kline',
         ttlMs: 30_000,
         sourceName: 'a-stock-data HTTP 行情',

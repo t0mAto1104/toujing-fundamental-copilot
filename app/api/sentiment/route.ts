@@ -31,8 +31,8 @@ export async function GET(request: Request) {
       throw new Error('查询范围无效：问答仅支持近 7 / 30 天，最多 10 页。');
     if (['concepts', 'questions'].includes(kind))
       symbol = stockSignalSymbol(params.get('symbol') || '');
-    if (kind === 'questions' && !symbol.startsWith('sz'))
-      throw new Error('互动易仅覆盖深市公司；沪市及北交所暂不支持此问答来源。');
+    if (kind === 'questions' && !/^(sh|sz)/.test(symbol))
+      throw new Error('问答覆盖沪市与深市公司；北交所暂不支持。');
   } catch (error) {
     return Response.json(
       { error: error instanceof Error ? error.message : '参数无效。' },

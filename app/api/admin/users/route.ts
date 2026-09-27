@@ -11,7 +11,6 @@ type UserRow = {
   last_seen_at: string;
   research_count: number;
   research_enabled: number;
-  daily_research_limit: number;
   daily_research_used: number;
   daily_research_date: string;
   allowed_ai_models: string;
@@ -22,6 +21,7 @@ type UserRow = {
 };
 
 type UsageEventRow = {
+  billing_source: string | null;
   id: string;
   user_id: string;
   email: string;
@@ -53,7 +53,6 @@ function serializeUser(row: UserRow, today: string) {
     lastSeenAt: row.last_seen_at,
     researchCount: row.research_count,
     researchEnabled: Boolean(row.research_enabled),
-    dailyResearchLimit: Math.max(0, row.daily_research_limit),
     dailyResearchUsed:
       row.daily_research_date === today
         ? Math.max(0, row.daily_research_used)
@@ -74,6 +73,10 @@ function serializeUsageEvent(row: UsageEventRow) {
     displayName: row.display_name,
     endpoint: row.endpoint,
     model: row.model,
+    billingSource:
+      row.billing_source === 'personal' || row.billing_source === 'site'
+        ? row.billing_source
+        : null,
     inputTokens: row.input_tokens,
     cachedInputTokens: row.cached_input_tokens,
     cacheWriteTokens: row.cache_write_tokens,
@@ -135,7 +138,7 @@ async function loadUsers() {
       .prepare(
         `SELECT u.id, u.email, u.display_name, u.first_seen_at,
           u.last_seen_at, u.research_count, u.research_enabled,
-          u.daily_research_limit, u.daily_research_used,
+          u.daily_research_used,
           u.daily_research_date, u.allowed_ai_models, u.report_token_limit, u.report_usd_limit,
           COUNT(e.id) AS ai_request_count,
           COALESCE(SUM(e.total_tokens), 0) AS total_tokens
@@ -150,7 +153,7 @@ async function loadUsers() {
     database
       .prepare(
         `SELECT e.id, e.user_id, u.email, u.display_name, e.endpoint,
-          e.model, e.input_tokens, e.output_tokens, e.reasoning_tokens,
+          e.model, e.billing_source, e.input_tokens, e.output_tokens, e.reasoning_tokens,
           e.total_tokens, e.web_search_requests, e.status, e.error_code, e.created_at,
           e.cached_input_tokens, e.cache_write_tokens, e.research_task_id,
           e.service_tier, e.estimated_cost_usd, e.pricing_version
@@ -204,7 +207,6 @@ export async function PATCH(request: Request) {
   const body = (await request.json()) as {
     userId?: string;
     researchEnabled?: boolean;
-    dailyResearchLimit?: number;
     allowedAIModels?: unknown[];
     reportTokenLimit?: number;
     reportUsdLimit?: number;
@@ -212,7 +214,6 @@ export async function PATCH(request: Request) {
   if (!body.userId || body.userId.length > 200)
     return Response.json({ error: '缺少目标用户。' }, { status: 400 });
   const hasAccessChange = typeof body.researchEnabled === 'boolean';
-  const hasLimitChange = Number.isInteger(body.dailyResearchLimit);
   const hasModelChange = Array.isArray(body.allowedAIModels);
   const hasBudgetChange =
     body.reportTokenLimit !== undefined || body.reportUsdLimit !== undefined;
@@ -229,21 +230,8 @@ export async function PATCH(request: Request) {
       { error: '单报告上限须为 1000～500000 Token、0～100 美元（不含零）。' },
       { status: 400 },
     );
-  if (
-    !hasAccessChange &&
-    !hasLimitChange &&
-    !hasModelChange &&
-    !hasBudgetChange
-  )
+  if (!hasAccessChange && !hasModelChange && !hasBudgetChange)
     return Response.json({ error: '没有可更新的限制条件。' }, { status: 400 });
-  if (
-    hasLimitChange &&
-    (body.dailyResearchLimit! < 0 || body.dailyResearchLimit! > 500)
-  )
-    return Response.json(
-      { error: '每日研究上限必须在 0 至 500 次之间。' },
-      { status: 400 },
-    );
   const allowedAIModels = hasModelChange
     ? Array.from(new Set(body.allowedAIModels!.filter(isAIModelId)))
     : null;
@@ -267,13 +255,12 @@ export async function PATCH(request: Request) {
 
   const current = await database
     .prepare(
-      `SELECT research_enabled, daily_research_limit, allowed_ai_models, report_token_limit, report_usd_limit
+      `SELECT research_enabled, allowed_ai_models, report_token_limit, report_usd_limit
        FROM users WHERE id = ? LIMIT 1`,
     )
     .bind(body.userId)
     .first<{
       research_enabled: number;
-      daily_research_limit: number;
       allowed_ai_models: string;
       report_token_limit: number;
       report_usd_limit: number;
@@ -282,7 +269,7 @@ export async function PATCH(request: Request) {
     return Response.json({ error: '未找到目标用户。' }, { status: 404 });
   const result = await database
     .prepare(
-      `UPDATE users SET research_enabled = ?, daily_research_limit = ?,
+      `UPDATE users SET research_enabled = ?,
         allowed_ai_models = ?, report_token_limit = ?, report_usd_limit = ? WHERE id = ?`,
     )
     .bind(
@@ -291,7 +278,6 @@ export async function PATCH(request: Request) {
           ? 1
           : 0
         : current.research_enabled,
-      hasLimitChange ? body.dailyResearchLimit : current.daily_research_limit,
       hasModelChange
         ? JSON.stringify(allowedAIModels)
         : current.allowed_ai_models,

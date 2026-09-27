@@ -1,5 +1,5 @@
 import {
-  getFundamentalFeed,
+  FINANCE_NEWS_CACHE_KEY,
   type FundamentalNewsItem,
 } from '@/lib/a-stock-macro';
 import {
@@ -138,13 +138,19 @@ function selectIndustries(question: string, snapshot: IndustrySnapshot) {
 
 export async function buildMarketAgentEvidence(question: string) {
   const [feedResult, industryResult] = await Promise.allSettled([
-    getFundamentalFeed(),
+    // Chat reads shared snapshots only. Current facts are checked by bounded
+    // web search; do not cascade into several slow HTTP refreshes per question.
+    readDataSnapshot<FundamentalNewsItem[]>(FINANCE_NEWS_CACHE_KEY),
     readDataSnapshot<IndustrySnapshot>(INDUSTRY_CACHE_KEY),
   ]);
   const rows: Array<Omit<MarketAgentEvidence, 'id'>> = [];
 
-  if (feedResult.status === 'fulfilled') {
-    for (const item of selectNews(question, feedResult.value.news)) {
+  if (
+    feedResult.status === 'fulfilled' &&
+    feedResult.value &&
+    !feedResult.value.stale
+  ) {
+    for (const item of selectNews(question, feedResult.value.value)) {
       rows.push({
         title: item.title,
         summary: `${item.summary.slice(0, 140)} ${item.implication.slice(0, 100)}`,
@@ -155,10 +161,12 @@ export async function buildMarketAgentEvidence(question: string) {
     }
   }
 
-  if (industryResult.status === 'fulfilled' && industryResult.value) {
-    rows.push(
-      ...selectIndustries(question, industryResult.value.value),
-    );
+  if (
+    industryResult.status === 'fulfilled' &&
+    industryResult.value &&
+    !industryResult.value.stale
+  ) {
+    rows.push(...selectIndustries(question, industryResult.value.value));
   }
 
   const seen = new Set<string>();
@@ -173,8 +181,6 @@ export async function buildMarketAgentEvidence(question: string) {
     .map((item, index) => ({ ...item, id: `S${index + 1}` }));
 }
 
-export function marketAgentEvidenceForPrompt(
-  evidence: MarketAgentEvidence[],
-) {
+export function marketAgentEvidenceForPrompt(evidence: MarketAgentEvidence[]) {
   return evidence.map(({ sourceUrl: _sourceUrl, ...item }) => item);
 }

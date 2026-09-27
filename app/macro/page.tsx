@@ -11,6 +11,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 
 import { WorkspaceShell } from '@/components/workspace-shell';
+import { MacroRates } from '@/components/market-extensions';
 import { macroPolicyItems } from '@/lib/macro-policy-data';
 
 type FilterValue = '全部' | '宏观' | '政策';
@@ -172,6 +173,9 @@ export default function MacroPage() {
           </div>
         </div>
 
+        <div className="my-6">
+          <MacroRates />
+        </div>
         <div className="sticky top-16 z-20 -mx-1 flex flex-col gap-3 border-b border-border bg-background/94 px-1 py-4 backdrop-blur sm:flex-row sm:items-center">
           <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
             <Filter className="mx-2 size-3.5 text-muted-foreground" />

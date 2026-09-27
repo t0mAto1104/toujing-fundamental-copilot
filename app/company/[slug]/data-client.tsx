@@ -12,7 +12,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { CompanySearchField } from '@/components/company-search-field';
+import { CompanyHistoryPanel } from '@/components/company-history-metrics';
+import { CompanyPeersPanel } from '@/components/company-peers';
 import { BoardMemberships, StockSignals } from '@/components/market-signals';
+import { CompanyEvents } from '@/components/market-extensions';
 import { OfficialMarginPanel } from '@/components/official-market-data';
 import { useTradingSession } from '@/components/trading-session';
 import { marketPollInterval, quoteDateStale } from '@/lib/official-data-types';
@@ -356,6 +359,15 @@ export default function CompanyData() {
                   </div>
                 </section>
 
+                <CompanyHistoryPanel
+                  key={data.listing.id}
+                  listing={data.listing}
+                />
+                <CompanyPeersPanel
+                  key={`peers:${data.listing.id}`}
+                  listing={data.listing}
+                />
+
                 <section>
                   <div className="flex items-center gap-2">
                     <FileText className="size-4 text-primary" />
@@ -533,6 +545,12 @@ export default function CompanyData() {
                 />
                 <div className="mt-6" />
                 <StockSignals key={signalSymbol} symbol={signalSymbol} />
+                <div className="mt-6">
+                  <CompanyEvents
+                    key={`events:${signalSymbol}`}
+                    symbol={signalSymbol}
+                  />
+                </div>
               </div>
             ) : null}
             <p className="mt-8 border-t border-border pt-4 text-[10px] leading-5 text-muted-foreground">

@@ -4,15 +4,15 @@
 
 import {
   BookOpen,
+  BookOpenText,
   ChartCandlestick,
-  Bot,
   ChevronDown,
   Compass,
   FileChartColumn,
+  Globe2,
   Landmark,
   LineChart,
   LogIn,
-  LogOut,
   Monitor,
   MessagesSquare,
   Moon,
@@ -20,10 +20,9 @@ import {
   ShieldCheck,
   Sun,
   UserRound,
-  UsersRound,
   WalletCards,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 
 import {
   Collapsible,
@@ -35,22 +34,19 @@ import {
   NativeSelectOption,
 } from '@/components/ui/native-select';
 import { useWorkspaceSession } from '@/components/workspace-session';
+import { AIConnectionSettings } from '@/components/ai-connection-settings';
 import { SITE_VERSION } from '@/lib/site-version';
 import {
   AI_MODELS,
   DEFAULT_AI_MODEL,
   DEFAULT_RESEARCH_MODEL,
-  defaultResearchModel,
-  getPreferredAIModel,
-  getPreferredResearchModel,
-  setPreferredAIModel,
-  setPreferredResearchModel,
   type AIModelId,
 } from '@/lib/ai-models';
 
 const navItems = [
   { href: '/', icon: Compass, label: '市场总览', key: 'market' },
   { href: '/quotes', icon: ChartCandlestick, label: '行情数据', key: 'quotes' },
+  { href: '/global', icon: Globe2, label: '全球市场', key: 'global' },
   { href: '/signals', icon: WalletCards, label: '资金与事件', key: 'signals' },
   {
     href: '/sentiment',
@@ -58,8 +54,19 @@ const navItems = [
     label: '舆情互动',
     key: 'sentiment',
   },
-  { href: '/research', icon: Bot, label: 'AI 研究助手', key: 'research' },
-  { href: '/industry', icon: LineChart, label: '行业比较', key: 'industry' },
+  {
+    href: '/report-builder',
+    icon: BookOpen,
+    label: 'AI自定义研报',
+    key: 'research',
+  },
+  { href: '/industry', icon: LineChart, label: '行业研究', key: 'industry' },
+  {
+    href: '/industry-reports',
+    icon: BookOpenText,
+    label: '行业研报',
+    key: 'industry-reports',
+  },
   { href: '/macro', icon: Landmark, label: '宏观政策', key: 'macro' },
   {
     href: '/reports',
@@ -91,13 +98,14 @@ function applyTheme(theme: Theme) {
 }
 
 export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
-  const { user } = useWorkspaceSession();
+  const modelChoiceId = useId();
+  const researchModelChoiceId = useId();
+  const { user, saveModels, savingModels } = useWorkspaceSession();
   const [accountOpen, setAccountOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>('system');
-  const [model, setModel] = useState<AIModelId>(DEFAULT_AI_MODEL);
-  const [researchModel, setResearchModel] = useState<AIModelId>(
-    DEFAULT_RESEARCH_MODEL,
-  );
+  const [modelMessage, setModelMessage] = useState('');
+  const model = user?.preferredChatModel || DEFAULT_AI_MODEL;
+  const researchModel = user?.preferredResearchModel || DEFAULT_RESEARCH_MODEL;
   const allowedModels = useMemo(
     () =>
       AI_MODELS.filter(
@@ -108,32 +116,19 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
   );
 
   useEffect(() => {
-    const storedTheme = window.localStorage.getItem('lens-theme');
-    const initialTheme =
-      storedTheme === 'light' || storedTheme === 'dark'
-        ? storedTheme
-        : 'system';
-    applyTheme(initialTheme);
-    const syncPreferences = window.setTimeout(() => {
+    const syncPreferences = () => {
+      const storedTheme = window.localStorage.getItem('lens-theme');
+      const initialTheme =
+        storedTheme === 'light' || storedTheme === 'dark'
+          ? storedTheme
+          : 'system';
+      applyTheme(initialTheme);
       setTheme(initialTheme);
-      // An unavailable policy is not an administrator changing the allowlist.
-      // Keep the user's saved model intact until a real policy is available.
-      if (user?.modelPolicyUnavailable) return;
-      const preferred = getPreferredAIModel();
-      const permitted = allowedModels.some((option) => option.id === preferred)
-        ? preferred
-        : allowedModels[0]?.id || DEFAULT_AI_MODEL;
-      setModel(permitted);
-      if (permitted !== preferred) setPreferredAIModel(permitted);
-      const researchPreferred = getPreferredResearchModel();
-      const researchPermitted =
-        researchPreferred &&
-        allowedModels.some((option) => option.id === researchPreferred)
-          ? researchPreferred
-          : defaultResearchModel(allowedModels.map((option) => option.id));
-      setResearchModel(researchPermitted);
-      // Do not persist an inferred default or overwrite a different user's preference.
-    }, 0);
+    };
+    const initialSync = window.setTimeout(syncPreferences, 0);
+    // Re-read settings changed in the mobile drawer when returning to desktop.
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    desktop.addEventListener('change', syncPreferences);
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const syncSystemTheme = () => {
       if ((window.localStorage.getItem('lens-theme') || 'system') === 'system')
@@ -141,10 +136,11 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
     };
     media.addEventListener('change', syncSystemTheme);
     return () => {
-      window.clearTimeout(syncPreferences);
+      window.clearTimeout(initialSync);
+      desktop.removeEventListener('change', syncPreferences);
       media.removeEventListener('change', syncSystemTheme);
     };
-  }, [allowedModels, user?.modelPolicyUnavailable]);
+  }, []);
 
   const chooseTheme = (nextTheme: Theme) => {
     setTheme(nextTheme);
@@ -152,34 +148,56 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
     applyTheme(nextTheme);
   };
 
-  const chooseModel = (nextModel: AIModelId) => {
-    setModel(nextModel);
-    setPreferredAIModel(nextModel);
+  const chooseModel = async (
+    field: 'preferredChatModel' | 'preferredResearchModel',
+    nextModel: AIModelId,
+  ) => {
+    setModelMessage('');
+    try {
+      await saveModels({ [field]: nextModel });
+      setModelMessage('已保存');
+    } catch (error) {
+      setModelMessage(
+        error instanceof Error ? error.message : '保存失败，请重试。',
+      );
+    }
   };
 
   return (
     <>
-      <nav className="space-y-1.5 text-sm" aria-label="产品导航">
+      <nav className="workspace-nav space-y-1.5 text-sm" aria-label="产品导航">
         {navItems
           .filter((item) => item.key !== 'admin' || user?.isAdmin)
           .map((item) => {
             const Icon = item.icon;
             const selected = item.key === active;
             return (
-              <a
-                key={item.key}
-                href={item.href}
-                aria-current={selected ? 'page' : undefined}
-                className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors ${selected ? 'border-primary/20 bg-primary/10 font-medium text-primary' : 'border-transparent text-muted-foreground hover:border-border hover:bg-card hover:text-foreground'}`}
-              >
-                <Icon className="size-4" />
-                {item.label}
-              </a>
+              <div key={item.key}>
+                {item.key === 'market' ||
+                item.key === 'research' ||
+                item.key === 'admin' ? (
+                  <p className="nav-group-label hidden" aria-hidden="true">
+                    {item.key === 'market'
+                      ? '市场观察'
+                      : item.key === 'research'
+                        ? '研究与洞察'
+                        : '管理'}
+                  </p>
+                ) : null}
+                <a
+                  href={item.href}
+                  aria-current={selected ? 'page' : undefined}
+                  className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors ${selected ? 'border-primary/20 bg-primary/10 font-medium text-primary' : 'border-transparent text-muted-foreground hover:border-border hover:bg-card hover:text-foreground'}`}
+                >
+                  <Icon className="size-4" />
+                  {item.label}
+                </a>
+              </div>
             );
           })}
       </nav>
 
-      <div className="mt-auto space-y-2 border-t border-border pt-3">
+      <div className="workspace-settings mt-auto space-y-2 border-t border-border pt-3">
         <Collapsible
           open={accountOpen}
           onOpenChange={setAccountOpen}
@@ -222,21 +240,9 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                 <a
                   href="/signout-with-chatgpt?return_to=%2F"
                   target="_top"
-                  className="mt-2 flex w-full items-center gap-2 border border-border px-2.5 py-2 text-[10px] font-medium hover:bg-muted"
+                  className="mt-2 flex min-h-11 w-full items-center justify-center whitespace-nowrap border border-border px-2.5 py-2 text-sm font-medium hover:bg-muted"
                 >
-                  <UsersRound className="size-3.5" />
-                  <span className="flex-1 text-left">登录其他用户</span>
-                  <span className="text-[8px] text-muted-foreground">
-                    先退出当前账户
-                  </span>
-                </a>
-                <a
-                  href="/signout-with-chatgpt?return_to=%2F"
-                  target="_top"
-                  className="mt-1 flex w-full items-center justify-center gap-1.5 px-3 py-1.5 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  <LogOut className="size-3.5" />
-                  退出登录
+                  退出当前账户
                 </a>
               </div>
             ) : (
@@ -260,19 +266,23 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                 <Settings2 className="size-3" />
                 个性设置
               </div>
+              {user ? <AIConnectionSettings key={user.email} /> : null}
               <label
-                htmlFor="ai-model-choice"
+                htmlFor={modelChoiceId}
                 className="mt-2 block text-[10px] font-medium"
               >
                 市场 Chat / 普通问答模型
               </label>
               <NativeSelect
-                id="ai-model-choice"
+                id={modelChoiceId}
                 size="sm"
                 value={model}
-                disabled={user?.modelPolicyUnavailable}
+                disabled={!user || user.modelPolicyUnavailable || savingModels}
                 onChange={(event) =>
-                  chooseModel(event.target.value as AIModelId)
+                  void chooseModel(
+                    'preferredChatModel',
+                    event.target.value as AIModelId,
+                  )
                 }
                 className="mt-1 w-full"
               >
@@ -283,21 +293,22 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                 ))}
               </NativeSelect>
               <label
-                htmlFor="research-model-choice"
+                htmlFor={researchModelChoiceId}
                 className="mt-2 block text-[10px] font-medium"
               >
                 深度研究模型
               </label>
               <NativeSelect
-                id="research-model-choice"
+                id={researchModelChoiceId}
                 size="sm"
                 value={researchModel}
-                disabled={user?.modelPolicyUnavailable}
-                onChange={(event) => {
-                  const next = event.target.value as AIModelId;
-                  setResearchModel(next);
-                  setPreferredResearchModel(next);
-                }}
+                disabled={!user || user.modelPolicyUnavailable || savingModels}
+                onChange={(event) =>
+                  void chooseModel(
+                    'preferredResearchModel',
+                    event.target.value as AIModelId,
+                  )
+                }
                 className="mt-1 w-full"
               >
                 {allowedModels.map((option) => (
@@ -306,17 +317,15 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
-              <p className="mt-1.5 text-[9px] leading-4 text-muted-foreground">
-                深度研究默认
-                Sol，费用高于普通问答；仅手动发起时运行。受管理员允许模型范围约束。
-              </p>
-              <p className="mt-1.5 text-[9px] leading-4 text-muted-foreground">
-                {user?.modelPolicyUnavailable
-                  ? '模型权限暂时无法加载，请稍后刷新页面重试。登录状态不受影响。'
-                  : user?.allowedAIModels
-                    ? `管理员允许 ${allowedModels.length} 个模型；服务端会强制校验。`
-                    : '登录后由管理员策略决定可选模型。'}
-              </p>
+              {savingModels || modelMessage || user?.modelPolicyUnavailable ? (
+                <output className="mt-1.5 text-xs leading-4 text-muted-foreground">
+                  {savingModels
+                    ? '正在保存…'
+                    : user?.modelPolicyUnavailable
+                      ? '模型设置暂时无法加载，请刷新后重试。'
+                      : modelMessage}
+                </output>
+              ) : null}
               <fieldset
                 className="mt-2 grid grid-cols-3 gap-px border border-border"
                 aria-label="网页背景风格"
@@ -342,15 +351,15 @@ export function WorkspaceNav({ active }: { active: WorkspaceSection }) {
           </CollapsibleContent>
         </Collapsible>
 
-        <div className="rounded-xl border border-border bg-card/70 p-3">
-          <div className="flex items-center gap-2 text-xs font-medium">
+        <details className="workspace-principles rounded-xl border border-border bg-card/70 p-3">
+          <summary className="flex cursor-pointer items-center gap-2 text-xs font-medium">
             <BookOpen className="size-3.5" />
             研究原则
-          </div>
+          </summary>
           <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
             基于政策、行业、资金、财报与宏观数据，不使用技术指标。
           </p>
-        </div>
+        </details>
         <p className="px-1 text-[9px] leading-4 text-muted-foreground">
           仅供信息参考，不构成投资建议
         </p>

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { registerHooks } from 'node:module';
 
 import {
   checkpointedResearchStage,
@@ -21,13 +22,101 @@ import {
 import type { ResearchDossier } from '../lib/research-dossier';
 import { canonicalSourceUrl } from '../lib/research-integrity';
 import { RESEARCH_TOPICS } from '../lib/research-framework';
-import { generateCompanyResearch } from '../lib/company-research-pipeline';
 import type { ListingOption } from '../lib/market-listings';
 import { publicEvidenceKey } from '../lib/research-evidence-plan';
+import {
+  defaultDraft,
+  newBlock,
+  isProgramModule,
+} from '../lib/report-template';
 import {
   readDataSnapshot,
   storeDataSnapshot,
 } from '../lib/data-snapshot-cache';
+
+// Pipeline budgeting test isolates identity/credential transport. The real
+// headers, D1 encryption and no-fallback boundary are exercised in byok.test.ts.
+Object.assign(globalThis, { __budgetUser: '' });
+registerHooks({
+  resolve(specifier, context, next) {
+    const source =
+      specifier === '@/lib/site-users'
+        ? `
+    export class ResearchAccessError extends Error {}
+    export const requireResearchAccess = async () => ({ user: { userId: globalThis.__budgetUser } });
+    export const resolvePermittedAIModel = (_, model) => model;
+  `
+        : specifier === '@/lib/ai-credentials'
+          ? `
+    export const resolveUserAICredential = async () => ({ apiKey: 'offline-test-not-a-real-key', billingSource: 'personal' });
+  `
+          : null;
+    return source
+      ? {
+          url: 'data:text/javascript,' + encodeURIComponent(source),
+          shortCircuit: true,
+        }
+      : next(specifier, context);
+  },
+});
+const { generateCompanyResearch } =
+  await import('../lib/company-research-pipeline');
+const {
+  customWritingBatches,
+  validCustomWriting,
+  customSearchPlan,
+  assembleCustomReport,
+  moduleResearchLens,
+} = await import('../lib/custom-research');
+
+void test('research lenses deepen existing modules without extra paid stages', () => {
+  assert.equal(customWritingBatches(defaultDraft()).length, 2);
+  assert.match(
+    moduleResearchLens('business', false, ['business', 'peers']),
+    /同业模块/,
+  );
+  assert.match(moduleResearchLens('business', true, ['business']), /最多5项/);
+  assert.match(
+    moduleResearchLens('industry', true, ['industry']),
+    /区分历史统计/,
+  );
+  assert.match(
+    moduleResearchLens('finance', false, ['finance'], '银行'),
+    /资本充足率/,
+  );
+  assert.equal(customSearchPlan(defaultDraft(), [], '银行').maxToolCalls, 0);
+  assert.deepEqual(customSearchPlan(defaultDraft(), [], '银行').priorities, []);
+  assert.equal(
+    customSearchPlan(defaultDraft(), ['银行财务盈利：净息差'], '银行')
+      .maxToolCalls,
+    2,
+  );
+});
+
+void test('template chunking bounds output and never sends program sections to model', () => {
+  for (const draft of [defaultDraft(), defaultDraft('deep')]) {
+    const chunks = customWritingBatches(draft);
+    assert.deepEqual(
+      chunks.flatMap((c) => c.blocks.map((b) => b.id)).sort(),
+      draft.blocks
+        .filter((b) => !isProgramModule(b.id))
+        .map((b) => b.id)
+        .sort(),
+    );
+    assert.ok(
+      chunks.every((c) => c.blocks.reduce((n, b) => n + b.units, 0) <= 8),
+    );
+  }
+  const draft = defaultDraft();
+  draft.blocks = [newBlock('finance'), newBlock('sources')];
+  assert.equal(customWritingBatches(draft).length, 1);
+  assert.equal(validCustomWriting({ unexpected: {} }, draft.blocks), false);
+  assert.equal(
+    customSearchPlan(draft, ['具名可比同行、产品差异与竞争壁垒']).priorities
+      .length,
+    0,
+  );
+});
 
 const dossier: ResearchDossier = {
   fetchedAt: '2026-09-04T00:00:00.000Z',
@@ -57,6 +146,188 @@ const dossier: ResearchDossier = {
     detail: '需要补充的检索边界'.repeat(20),
   })),
 };
+
+void test('custom pipeline writes only selected modules, resumes paid chunks and records original template', async (context) => {
+  const listing: ListingOption = {
+    id: 'SZ:000001',
+    name: '离线模板测试',
+    code: '000001',
+    exchange: '深交所',
+    exchangeCode: 'SZ',
+    currency: 'CNY',
+    securityType: '深A',
+    quoteId: '0.000001',
+  };
+  const template = defaultDraft();
+  template.blocks = [
+    newBlock('business'),
+    {
+      ...newBlock('finance'),
+      title: '自定义财务章节',
+      requirement: '重点比较现金兑现；这是离线测试的用户要求',
+      layout: 'columns',
+      breakBefore: true,
+    },
+    newBlock('calculations'),
+    newBlock('sources'),
+  ];
+  const taskId = crypto.randomUUID(),
+    userId = `custom-${taskId}`;
+  const { RESEARCH_PIPELINE_VERSION } =
+    await import('../lib/research-checkpoints');
+  const baseKey = `research-checkpoint:${RESEARCH_PIPELINE_VERSION}:${userId}:${taskId}`;
+  Object.assign(globalThis, { __budgetUser: userId });
+  await saveResearchCheckpoint(`${baseKey}:http`, {
+    industry: '银行',
+    industryBasis: '根据公司主营原文选择银行研究方向，非官方行业分类',
+    industrySourceUrls: [dossier.documents[0].url],
+    dossier,
+    packet: null,
+    macro: null,
+    warnings: [],
+    quote: {
+      price: '1',
+      change: '0%',
+      currency: 'CNY',
+      marketCap: '离线样本',
+      asOf: new Date().toISOString(),
+      sourceUrl: dossier.documents[0].url,
+      sourceName: '离线来源',
+    },
+  });
+  let collect = 0,
+    business = 0,
+    finance = 0;
+  context.mock.method(
+    globalThis,
+    'fetch',
+    async (url: string, init: RequestInit) => {
+      assert.equal(url, 'https://api.openai.com/v1/responses');
+      const body = JSON.parse(init.body as string);
+      const prompt = JSON.parse(
+        typeof body.input === 'string'
+          ? body.input
+          : body.input[1].content[0].text,
+      );
+      let data: unknown;
+      if (body.text.format.name.includes('evidence')) {
+        collect++;
+        assert.ok(body.max_tool_calls <= 2);
+        data = { findings: [], missing: [] };
+      } else {
+        assert.equal(body.text.format.name, 'custom_report_modules_v1');
+        assert.equal(body.tools, undefined);
+        const ids = Object.keys(body.text.format.schema.properties);
+        assert.ok(!ids.includes('calculations') && !ids.includes('sources'));
+        if (ids.includes('business')) business++;
+        if (ids.includes('finance')) {
+          finance++;
+          assert.match(prompt.selectedModules[0].requirement, /现金兑现/);
+          if (finance === 1)
+            return Response.json(
+              {
+                error: {
+                  code: 'invalid_request_error',
+                  message: 'simulated failed chunk',
+                },
+              },
+              { status: 400 },
+            );
+        }
+        data = Object.fromEntries(
+          ids.map((id) => [
+            id,
+            {
+              ...(id === 'business'
+                ? {
+                    companyIntroduction: '这是离线测试公司，主营测试业务。',
+                    developmentHistory:
+                      '仅用于测试的发展历程，非公司实际信息。',
+                  }
+                : {}),
+              facts: '测试披露事实。',
+              analysis: '经营变量的条件分析。',
+              counterEvidence: '需求未兑现的风险。',
+              watchFor: '下一期披露。',
+              sourceUrls: ['S1'],
+              dataGaps: [],
+            },
+          ]),
+        );
+      }
+      return Response.json({
+        status: 'completed',
+        output: [
+          {
+            type: 'message',
+            content: [{ type: 'output_text', text: JSON.stringify(data) }],
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 100, total_tokens: 200 },
+      });
+    },
+  );
+  const input = {
+    query: listing.name,
+    listing,
+    model: 'gpt-5.6-sol',
+    userId,
+    researchTaskId: taskId,
+    reportTemplate: template,
+  };
+  await assert.rejects(generateCompanyResearch(input));
+  const result = await generateCompanyResearch(input);
+  assert.deepEqual([collect, business, finance], [1, 1, 2]);
+  assert.deepEqual(result.report.customReport?.template, template);
+  assert.deepEqual(Object.keys(result.report.customReport!.sections).sort(), [
+    'business',
+    'finance',
+  ]);
+  assert.equal(
+    result.report.customReport?.sections.business?.sourceUrls[0],
+    canonicalSourceUrl(dossier.documents[0].url),
+  );
+  assert.equal(result.report.researchRun?.taskId, taskId);
+  assert.match(
+    result.report.deepResearch!.methodology!.profileBasis.label,
+    /非官方行业分类/,
+  );
+  assert.deepEqual(
+    result.report.deepResearch!.methodology!.profileBasis.sourceUrls,
+    [dossier.documents[0].url],
+  );
+  await generateCompanyResearch(input);
+  assert.deepEqual(
+    [collect, business, finance],
+    [1, 1, 2],
+    'fully saved custom chunks must not be charged again',
+  );
+  const evidence = await readResearchCheckpoint<
+    import('../lib/company-research-pipeline').ReadyEvidence
+  >(`${baseKey}:ready`);
+  assert.ok(evidence);
+  const sections = structuredClone(
+    result.report.customReport!.sections,
+  ) as Record<string, import('../lib/custom-research').CustomSection>;
+  sections.business.sourceUrls = ['https://untrusted.invalid/not-in-evidence'];
+  sections.finance.analysis = '建议买入';
+  evidence.retrievalGaps = ['离线补证缺口必须保留'];
+  const rejected = assembleCustomReport(template, sections, evidence, listing);
+  assert.ok(
+    rejected
+      .customReport!.checks.filter(
+        (c) =>
+          c.label === template.blocks[0].title ||
+          c.label === template.blocks[1].title,
+      )
+      .every((c) => !c.passed),
+  );
+  assert.deepEqual(rejected.customReport!.sections.business!.sourceUrls, []);
+  assert.ok(
+    !rejected.customReport!.sections.finance!.analysis.includes('建议买入'),
+  );
+  assert.ok(rejected.customReport!.gaps.includes('离线补证缺口必须保留'));
+});
 
 void test('collect brief is compact even when the source dossier is large', () => {
   const raw = JSON.stringify(dossier);
@@ -116,10 +387,19 @@ void test('supplementary statements retain receivables and inventory without rep
     应收账款: '20元',
     存货: '10元',
   };
+  sample.financialHistory[0].fieldOrigins = {
+    应收账款: { title: '原始应收账款标签', sourceField: 'ACCOUNTS_RECEIVABLE' },
+    存货: { title: '原始存货标签', sourceField: 'INVENTORY' },
+  };
   const rows = writingFinancialDetails(sample);
   assert.equal(rows[0].values['应收账款'], '20元');
   assert.equal(rows[0].values['存货'], '10元');
   assert.equal(rows[0].values['营业收入'], undefined);
+  assert.equal('fieldOrigins' in rows[0], false);
+  assert.equal(
+    sample.financialHistory[0].fieldOrigins['存货'].sourceField,
+    'INVENTORY',
+  );
 });
 
 void test('writer uses short source IDs and restores only trusted URLs', () => {
@@ -223,6 +503,7 @@ void test('a timed-out writing half resumes without repeating collection or the 
     ...input,
     listingId: listing.id,
   });
+  Object.assign(globalThis, { __budgetUser: input.userId });
   await saveResearchCheckpoint(`${baseKey}:http`, {
     dossier,
     packet: null,
@@ -401,6 +682,7 @@ void test('a timed-out writing half resumes without repeating collection or the 
     });
     const http = await readResearchCheckpoint(`${baseKey}:http`);
     await saveResearchCheckpoint(`${otherBase}:http`, http);
+    Object.assign(globalThis, { __budgetUser: other.userId });
     const switched = await generateCompanyResearch(other);
     assert.deepEqual(calls, { collect: 1, business: 2, finance: 3 });
     assert.equal(switched.usage.length, 2);
@@ -424,6 +706,7 @@ void test('a timed-out writing half resumes without repeating collection or the 
       listingId: listing.id,
     });
     await saveResearchCheckpoint(`${nextBase}:http`, http);
+    Object.assign(globalThis, { __budgetUser: next.userId });
     await generateCompanyResearch(next);
     assert.deepEqual(calls, { collect: 2, business: 3, finance: 4 });
     const legacy = {
@@ -436,6 +719,7 @@ void test('a timed-out writing half resumes without repeating collection or the 
       listingId: listing.id,
     });
     await saveResearchCheckpoint(`${legacyBase}:http`, http);
+    Object.assign(globalThis, { __budgetUser: legacy.userId });
     await generateCompanyResearch(legacy);
     assert.deepEqual(calls, { collect: 2, business: 4, finance: 5 });
     // Complete dated HTTP materials bypass the paid collect path entirely.
@@ -446,11 +730,17 @@ void test('a timed-out writing half resumes without repeating collection or the 
       {
         ...dossier.documents[0],
         title: `${new Date().getUTCFullYear()}年半年度报告`,
+        extraction: {
+          totalPages: 100,
+          pagesRead: 100,
+          complete: true,
+          warnings: [],
+        },
         date: new Date().toISOString(),
         excerpts: [
           {
             page: 1,
-            text: '分产品营业收入、同行业公司测试股份有限公司、行业需求政策、联营企业权益法、关联交易和受限资金。'.repeat(
+            text: '公司简介：本公司于2000年成立，主要业务为合成测试业务。分产品营业收入、同行业公司测试股份有限公司、行业需求政策及市场规模渗透率、供应商原料与客户认证量产收入、联营企业权益法、关联交易和受限资金。'.repeat(
               6,
             ),
           },
@@ -466,6 +756,7 @@ void test('a timed-out writing half resumes without repeating collection or the 
       ...(http as object),
       dossier: coveredDossier,
     });
+    Object.assign(globalThis, { __budgetUser: covered.userId });
     const direct = await generateCompanyResearch(covered);
     assert.deepEqual(calls, { collect: 2, business: 5, finance: 6 });
     assert.equal(direct.usage.length, 2);

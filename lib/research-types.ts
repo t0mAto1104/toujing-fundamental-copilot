@@ -24,7 +24,7 @@ export type FactorEvidence = {
 
 export type FactorGroup = {
   category: '政策' | '行业' | '资金' | '财报' | '宏观';
-  signal: '正面' | '中性' | '负面';
+  signal: '正面' | '中性' | '负面' | '待核验';
   title: string;
   summary: string;
   evidence: FactorEvidence[];
@@ -54,6 +54,14 @@ export type ResearchScenario = {
 };
 
 export type DeepResearch = {
+  commodities?: import('@/lib/research-commodities').CommodityEvidence;
+  history?: import('@/lib/research-history').ReportHistory;
+  review?: import('@/lib/research-review').ReportReview;
+  peerValuation?: import('@/lib/company-peers').CompanyPeers;
+  quality?: import('@/lib/research-quality').ResearchQuality;
+  methodology?: ReturnType<
+    typeof import('@/lib/research-methods').retrieveResearchMethods
+  >;
   strategicInvestments?: Array<{
     entity: string;
     ownershipAndAccounting: string;
@@ -101,6 +109,8 @@ export type DeepResearch = {
     sourceUrls: string[];
   }>;
   peerComparison?: Array<{
+    selectionReason?: string;
+    evidencePeriod?: string;
     company: string;
     business: string;
     position: string;
@@ -127,6 +137,7 @@ export type DeepResearch = {
 };
 
 export type CompanyReport = {
+  customReport?: import('@/lib/custom-research').CustomReport;
   researchRun?: {
     taskId: string;
     model: string;
@@ -154,7 +165,7 @@ export type CompanyReport = {
     staleReason?: string;
   };
   thesis: string;
-  stance: '积极' | '中性' | '谨慎';
+  stance: '积极' | '中性' | '谨慎' | '待核验' | '条件分析' | '局部分析';
   overview: string;
   metrics: CompanyMetric[];
   factors: FactorGroup[];

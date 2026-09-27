@@ -14,6 +14,7 @@ type EastmoneyIndustry = {
   f128?: string;
   f136?: number;
   f140?: string;
+  f124?: number;
 };
 
 type EastmoneyResponse = {
@@ -33,6 +34,7 @@ export type IndustryItem = {
   fallCount: number;
   flatCount: number;
   rank: number;
+  asOf?: string | null;
   leader: {
     name: string;
     code: string;
@@ -54,7 +56,7 @@ export type IndustrySnapshot = {
 // 线上实测该接口会把更大的 pz 静默限制为 100；固定使用 100 可避免
 // 页码仍按请求容量跳转时漏掉中间行业。
 const PAGE_SIZE = 100;
-const INDUSTRY_CACHE_TTL_MS = 5 * 60_000;
+const INDUSTRY_CACHE_TTL_MS = 60_000;
 export const INDUSTRY_CACHE_KEY = 'industry:all';
 const EASTMONEY_HOSTS = [
   'https://push2.eastmoney.com',
@@ -62,7 +64,7 @@ const EASTMONEY_HOSTS = [
 ];
 
 function industryUrl(host: string, page: number) {
-  const fields = 'f2,f3,f12,f14,f62,f104,f105,f106,f128,f136,f140';
+  const fields = 'f2,f3,f12,f14,f62,f104,f105,f106,f128,f136,f140,f124';
   return `${host}/api/qt/clist/get?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=${fields}`;
 }
 
@@ -161,7 +163,7 @@ async function fetchLeaderPrices(codes: string[]) {
               Referer: 'https://gu.qq.com/',
               'User-Agent': 'Mozilla/5.0',
             },
-            cf: { cacheTtl: 300, cacheEverything: true },
+            cf: { cacheTtl: 60, cacheEverything: true },
           } as RequestInit & {
             cf: { cacheTtl: number; cacheEverything: boolean };
           },
@@ -207,6 +209,12 @@ async function refreshIndustrySnapshot(): Promise<IndustrySnapshot> {
         indexValue: Number.isFinite(row.f2) ? row.f2! : null,
         percent: row.f3!,
         mainNetFlow: Number.isFinite(row.f62) ? row.f62! : null,
+        asOf:
+          typeof row.f124 === 'number' &&
+          row.f124 >= Date.UTC(2000, 0, 1) / 1000 &&
+          row.f124 * 1000 <= Date.now() + 60_000
+            ? new Date(row.f124 * 1000).toISOString()
+            : null,
         riseCount: row.f104 || 0,
         fallCount: row.f105 || 0,
         flatCount: row.f106 || 0,
@@ -234,7 +242,7 @@ async function refreshIndustrySnapshot(): Promise<IndustrySnapshot> {
     provider: `东方财富行业分类（${host.includes('delay') ? '备用域名' : '主域名'}）· 腾讯领涨股行情`,
     sourceUrl: `${host}/api/qt/clist/get`,
     methodology:
-      '覆盖数据源返回的全部A股行业细分；行业涨跌、资金与涨跌家数来自东方财富，领涨公司价格由腾讯行情交叉补充。东方财富请求严格串行并写入D1五分钟共享缓存，缺失字段不估算。',
+      '覆盖数据源返回的全部A股行业细分；行业涨跌、资金与涨跌家数来自东方财富，领涨公司价格由腾讯行情交叉补充。东方财富请求严格串行并写入D1一分钟共享缓存；获取时间不等于来源行情时间，缺失字段不估算。',
   };
 }
 
@@ -245,6 +253,7 @@ export async function getIndustrySnapshot() {
     ttlMs: INDUSTRY_CACHE_TTL_MS,
     sourceName: '东方财富行业分类 · 腾讯行情',
     sourceUrl: 'https://push2delay.eastmoney.com/api/qt/clist/get',
+    requestScoped: true,
     refresh: refreshIndustrySnapshot,
   });
 }

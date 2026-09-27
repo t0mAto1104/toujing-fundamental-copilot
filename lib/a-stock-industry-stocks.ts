@@ -19,7 +19,7 @@ import { requestDeadline } from '@/lib/request-deadline';
 
 type Options = ReturnType<typeof industryStockOptions>;
 type Raw = Record<string, unknown>;
-type FullIndustry = {
+export type FullIndustry = {
   total: number;
   filtered: number;
   sourceAsOf: string | null;
@@ -152,16 +152,8 @@ export function rankIndustryStocks(
   };
 }
 
-export async function getIndustryStocks(
-  options: Options,
-  parent?: AbortSignal,
-) {
-  const verified = industryStockOptions(
-    options.board,
-    options.sort,
-    options.order,
-    options.page,
-  );
+export async function getIndustryUniverse(board: string, parent?: AbortSignal) {
+  const verified = industryStockOptions(board);
   const deadline = requestDeadline(35_000, parent);
   try {
     // Reuse the heatmap taxonomy; concept/geographic boards are not industries.
@@ -227,7 +219,6 @@ export async function getIndustryStocks(
       throw new Error('旧排名已停止展示，请稍后刷新。');
     return {
       ...result,
-      data: rankIndustryStocks(result.data, verified, result.fetchedAt),
       stale: result.stale || catalog.stale,
       notice:
         result.notice ||
@@ -238,4 +229,21 @@ export async function getIndustryStocks(
   } finally {
     deadline.dispose();
   }
+}
+
+export async function getIndustryStocks(
+  options: Options,
+  parent?: AbortSignal,
+) {
+  const verified = industryStockOptions(
+    options.board,
+    options.sort,
+    options.order,
+    options.page,
+  );
+  const result = await getIndustryUniverse(verified.board, parent);
+  return {
+    ...result,
+    data: rankIndustryStocks(result.data, verified, result.fetchedAt),
+  };
 }
