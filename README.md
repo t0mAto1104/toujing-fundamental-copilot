@@ -8,7 +8,7 @@
 <p align="center">从真实数据出发，理解业务、财务与事件之间的关系。</p>
 
 <p align="center">
-  <a href="https://toujing-fundamental-copilot.fengjiezhou2050.chatgpt.site">访问网站</a> ·
+  <a href="https://toujing.fengjiezhou2050.chatgpt.site">访问网站</a> ·
   <a href="#核心功能">核心功能</a> ·
   <a href="#ai-研究流程">研究流程</a> ·
   <a href="#本地开发">本地开发</a> ·
