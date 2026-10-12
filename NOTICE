@@ -1,0 +1,21 @@
+Toujing / 透镜 · 基本面分析 Copilot
+Copyright 2026 t0mAto1104 and contributors
+
+This project is licensed under the Apache License, Version 2.0.
+See LICENSE for the license text.
+
+Bundled third-party material:
+
+a-stock-data
+Copyright 2026 Simon Lin
+Licensed under the Apache License, Version 2.0.
+Source: https://github.com/t0mAto1104/a-stock-data
+The bundled material and its original license are retained in
+vendor/skills/a-stock-data/.
+
+Third-party dependencies retain their respective copyrights, licenses and
+notices. Preserve the applicable notices when redistributing those dependencies
+or build artifacts containing them. This is not an exhaustive dependency list.
+
+This NOTICE is informational and does not modify the Apache License or grant
+additional rights to third-party data, services or trademarks.
